@@ -6,7 +6,6 @@
 #include <sys/socket.h>
 #include <sys/sysinfo.h>
 #include <sys/stat.h>
-#include <errno.h>
 
 #define PORT 9410
 #define AUTH_TOKEN "OPS-2705"
@@ -16,14 +15,9 @@
 #define STORAGE_DIR "./agentfiles/IT24102705"
 #define MAX_FILE_SIZE (10 * 1024 * 1024)
 
-/* -------------------------------------------------
-   Buffered TCP reader
-
-   This is important because TCP may return:
-   - only part of a line
-   - several lines together
-   - PUT header + some file bytes together
-   ------------------------------------------------- */
+/* =================================================
+   BUFFERED TCP READER
+   ================================================= */
 typedef struct
 {
     int fd;
@@ -32,9 +26,9 @@ typedef struct
     size_t end;
 } ConnReader;
 
-/* -------------------------------------------------
-   Send all bytes
-   ------------------------------------------------- */
+/* =================================================
+   SEND ALL BYTES
+   ================================================= */
 int send_all(int fd, const void *data, size_t length)
 {
     const unsigned char *ptr = data;
@@ -43,7 +37,12 @@ int send_all(int fd, const void *data, size_t length)
     while (total < length)
     {
         ssize_t sent =
-            send(fd, ptr + total, length - total, 0);
+            send(
+                fd,
+                ptr + total,
+                length - total,
+                0
+            );
 
         if (sent <= 0)
         {
@@ -56,20 +55,23 @@ int send_all(int fd, const void *data, size_t length)
     return 0;
 }
 
-/* -------------------------------------------------
-   Send text response
-   ------------------------------------------------- */
-void send_response(int client_fd, const char *message)
+/* =================================================
+   SEND TEXT RESPONSE
+   ================================================= */
+void send_response(
+    int client_fd,
+    const char *message)
 {
-    send_all(client_fd, message, strlen(message));
+    send_all(
+        client_fd,
+        message,
+        strlen(message)
+    );
 }
 
-/* -------------------------------------------------
-   Read one complete newline-terminated TCP line.
-
-   Any extra bytes remain in ConnReader for the
-   next command or PUT file data.
-   ------------------------------------------------- */
+/* =================================================
+   READ ONE COMPLETE TCP LINE
+   ================================================= */
 ssize_t read_line(
     ConnReader *reader,
     char *line,
@@ -79,7 +81,6 @@ ssize_t read_line(
 
     while (1)
     {
-        /* Check already buffered bytes */
         while (reader->start < reader->end)
         {
             unsigned char c =
@@ -87,7 +88,6 @@ ssize_t read_line(
 
             if (c == '\n')
             {
-                /* Remove optional CR */
                 if (line_pos > 0 &&
                     line[line_pos - 1] == '\r')
                 {
@@ -107,7 +107,6 @@ ssize_t read_line(
             line[line_pos++] = (char)c;
         }
 
-        /* Buffer is empty - receive more */
         ssize_t received =
             recv(
                 reader->fd,
@@ -126,13 +125,10 @@ ssize_t read_line(
     }
 }
 
-/* -------------------------------------------------
-   Read exactly N raw bytes.
-
-   First uses bytes already stored in the buffered
-   reader, then calls recv() until exact byte count
-   has been received.
-   ------------------------------------------------- */
+/* =================================================
+   READ EXACT RAW BYTES
+   Used by PUT
+   ================================================= */
 int read_exact(
     ConnReader *reader,
     FILE *file,
@@ -142,6 +138,10 @@ int read_exact(
 
     while (remaining > 0)
     {
+        /*
+           First use any bytes already received
+           after the PUT command line.
+        */
         if (reader->start < reader->end)
         {
             size_t available =
@@ -171,8 +171,8 @@ int read_exact(
 
         size_t wanted =
             remaining < sizeof(temp)
-            ? remaining
-            : sizeof(temp);
+                ? remaining
+                : sizeof(temp);
 
         ssize_t received =
             recv(
@@ -202,20 +202,20 @@ int read_exact(
     return 0;
 }
 
-/* -------------------------------------------------
-   Check filename safety
-
-   Prevent paths such as:
-   ../../etc/passwd
-   folder/file.txt
-   ------------------------------------------------- */
+/* =================================================
+   SAFE FILENAME CHECK
+   ================================================= */
 int valid_filename(const char *filename)
 {
-    if (filename == NULL || filename[0] == '\0')
+    if (filename == NULL ||
+        filename[0] == '\0')
     {
         return 0;
     }
 
+    /*
+       Prevent directory traversal.
+    */
     if (strstr(filename, "..") != NULL)
     {
         return 0;
@@ -230,14 +230,15 @@ int valid_filename(const char *filename)
     return 1;
 }
 
-/* -------------------------------------------------
+/* =================================================
    SYSINFO
-   ------------------------------------------------- */
+   ================================================= */
 void handle_sysinfo(int client_fd)
 {
     struct sysinfo info;
 
     double cpu_load;
+
     unsigned long mem_used_mb;
     unsigned long total_ram;
     unsigned long free_ram;
@@ -277,12 +278,15 @@ void handle_sysinfo(int client_fd)
         SID
     );
 
-    send_response(client_fd, response);
+    send_response(
+        client_fd,
+        response
+    );
 }
 
-/* -------------------------------------------------
+/* =================================================
    LISTPROC
-   ------------------------------------------------- */
+   ================================================= */
 void handle_listproc(int client_fd)
 {
     FILE *fp;
@@ -290,7 +294,10 @@ void handle_listproc(int client_fd)
     char line[128];
     char response[BUFFER_SIZE];
 
-    strcpy(response, "OK PROCS ");
+    strcpy(
+        response,
+        "OK PROCS "
+    );
 
     fp = popen(
         "ps -eo pid,comm --no-headers",
@@ -307,9 +314,14 @@ void handle_listproc(int client_fd)
         return;
     }
 
-    while (fgets(line, sizeof(line), fp) != NULL)
+    while (fgets(
+               line,
+               sizeof(line),
+               fp) != NULL)
     {
-        line[strcspn(line, "\r\n")] = '\0';
+        line[
+            strcspn(line, "\r\n")
+        ] = '\0';
 
         if (strlen(response)
             + strlen(line)
@@ -326,7 +338,8 @@ void handle_listproc(int client_fd)
 
     pclose(fp);
 
-    size_t len = strlen(response);
+    size_t len =
+        strlen(response);
 
     if (len > 0 &&
         response[len - 1] == ',')
@@ -339,12 +352,15 @@ void handle_listproc(int client_fd)
         " SID:" SID "\n"
     );
 
-    send_response(client_fd, response);
+    send_response(
+        client_fd,
+        response
+    );
 }
 
-/* -------------------------------------------------
+/* =================================================
    EXEC
-   ------------------------------------------------- */
+   ================================================= */
 void handle_exec(
     int client_fd,
     const char *exec_command)
@@ -357,24 +373,36 @@ void handle_exec(
     char output[BUFFER_SIZE];
     char response[BUFFER_SIZE];
 
-    /* Fixed whitelist */
-    if (strcmp(exec_command, "DATE") == 0)
+    /*
+       Fixed assignment whitelist.
+    */
+    if (strcmp(
+            exec_command,
+            "DATE") == 0)
     {
         shell_command = "date";
     }
-    else if (strcmp(exec_command, "UPTIME") == 0)
+    else if (strcmp(
+                 exec_command,
+                 "UPTIME") == 0)
     {
         shell_command = "uptime";
     }
-    else if (strcmp(exec_command, "DISKFREE") == 0)
+    else if (strcmp(
+                 exec_command,
+                 "DISKFREE") == 0)
     {
         shell_command = "df -h";
     }
-    else if (strcmp(exec_command, "HOSTNAME") == 0)
+    else if (strcmp(
+                 exec_command,
+                 "HOSTNAME") == 0)
     {
         shell_command = "hostname";
     }
-    else if (strcmp(exec_command, "WHOAMI") == 0)
+    else if (strcmp(
+                 exec_command,
+                 "WHOAMI") == 0)
     {
         shell_command = "whoami";
     }
@@ -382,7 +410,9 @@ void handle_exec(
     {
         send_response(
             client_fd,
-            "ERR 002 COMMAND_NOT_ALLOWED SID:" SID "\n"
+            "ERR 002 COMMAND_NOT_ALLOWED SID:"
+            SID
+            "\n"
         );
 
         return;
@@ -390,21 +420,31 @@ void handle_exec(
 
     output[0] = '\0';
 
-    fp = popen(shell_command, "r");
+    fp = popen(
+        shell_command,
+        "r"
+    );
 
     if (fp == NULL)
     {
         send_response(
             client_fd,
-            "ERR 008 EXEC_FAILED SID:" SID "\n"
+            "ERR 008 EXEC_FAILED SID:"
+            SID
+            "\n"
         );
 
         return;
     }
 
-    while (fgets(line, sizeof(line), fp) != NULL)
+    while (fgets(
+               line,
+               sizeof(line),
+               fp) != NULL)
     {
-        line[strcspn(line, "\r\n")] = '\0';
+        line[
+            strcspn(line, "\r\n")
+        ] = '\0';
 
         if (strlen(output)
             + strlen(line)
@@ -420,7 +460,8 @@ void handle_exec(
 
     pclose(fp);
 
-    size_t len = strlen(output);
+    size_t len =
+        strlen(output);
 
     if (len > 0 &&
         output[len - 1] == ' ')
@@ -429,8 +470,8 @@ void handle_exec(
     }
 
     /*
-       IMPORTANT:
-       Assignment exact response is EXEC_RESULT.
+       Exact assignment format:
+       OK EXEC_RESULT <output> SID:<sid>
     */
     snprintf(
         response,
@@ -440,12 +481,16 @@ void handle_exec(
         SID
     );
 
-    send_response(client_fd, response);
+    send_response(
+        client_fd,
+        response
+    );
 }
 
-/* -------------------------------------------------
+/* =================================================
    PUT
-   ------------------------------------------------- */
+   Controller -> Agent
+   ================================================= */
 void handle_put(
     int client_fd,
     ConnReader *reader,
@@ -455,33 +500,45 @@ void handle_put(
     char filepath[512];
     char response[BUFFER_SIZE];
 
-    /* File size limit */
+    /*
+       Maximum upload size = 10 MB.
+    */
     if (filesize > MAX_FILE_SIZE)
     {
         send_response(
             client_fd,
-            "ERR 004 FILE_TOO_LARGE SID:" SID "\n"
+            "ERR 004 FILE_TOO_LARGE SID:"
+            SID
+            "\n"
         );
 
         return;
     }
 
-    /* Basic filename security */
     if (!valid_filename(filename))
     {
         send_response(
             client_fd,
-            "ERR 009 INVALID_FILENAME SID:" SID "\n"
+            "ERR 009 INVALID_FILENAME SID:"
+            SID
+            "\n"
         );
 
         return;
     }
 
     /*
-       Ensure personalised storage directory exists.
+       Create personalised storage directory.
     */
-    mkdir("./agentfiles", 0755);
-    mkdir(STORAGE_DIR, 0755);
+    mkdir(
+        "./agentfiles",
+        0755
+    );
+
+    mkdir(
+        STORAGE_DIR,
+        0755
+    );
 
     snprintf(
         filepath,
@@ -492,13 +549,18 @@ void handle_put(
     );
 
     FILE *file =
-        fopen(filepath, "wb");
+        fopen(
+            filepath,
+            "wb"
+        );
 
     if (file == NULL)
     {
         send_response(
             client_fd,
-            "ERR 010 FILE_WRITE_FAILED SID:" SID "\n"
+            "ERR 010 FILE_WRITE_FAILED SID:"
+            SID
+            "\n"
         );
 
         return;
@@ -514,12 +576,16 @@ void handle_put(
     {
         fclose(file);
 
-        /* Delete incomplete file */
+        /*
+           Remove incomplete file.
+        */
         remove(filepath);
 
         send_response(
             client_fd,
-            "ERR 010 FILE_WRITE_FAILED SID:" SID "\n"
+            "ERR 010 FILE_WRITE_FAILED SID:"
+            SID
+            "\n"
         );
 
         return;
@@ -528,7 +594,7 @@ void handle_put(
     fclose(file);
 
     /*
-       Exact success format required by assignment.
+       Exact assignment PUT response.
     */
     snprintf(
         response,
@@ -538,7 +604,10 @@ void handle_put(
         SID
     );
 
-    send_response(client_fd, response);
+    send_response(
+        client_fd,
+        response
+    );
 
     printf(
         "File received: %s (%zu bytes)\n",
@@ -547,9 +616,137 @@ void handle_put(
     );
 }
 
-/* -------------------------------------------------
+/* =================================================
+   GET
+   Agent -> Controller
+   ================================================= */
+void handle_get(
+    int client_fd,
+    const char *filename)
+{
+    char filepath[512];
+    char response[BUFFER_SIZE];
+
+    unsigned char buffer[BUFFER_SIZE];
+
+    struct stat file_info;
+
+    /*
+       Reject unsafe filenames.
+    */
+    if (!valid_filename(filename))
+    {
+        send_response(
+            client_fd,
+            "ERR 005 FILE_NOT_FOUND SID:"
+            SID
+            "\n"
+        );
+
+        return;
+    }
+
+    snprintf(
+        filepath,
+        sizeof(filepath),
+        "%s/%s",
+        STORAGE_DIR,
+        filename
+    );
+
+    /*
+       Check whether requested file exists.
+    */
+    if (stat(
+            filepath,
+            &file_info) != 0)
+    {
+        send_response(
+            client_fd,
+            "ERR 005 FILE_NOT_FOUND SID:"
+            SID
+            "\n"
+        );
+
+        return;
+    }
+
+    FILE *file =
+        fopen(
+            filepath,
+            "rb"
+        );
+
+    if (file == NULL)
+    {
+        send_response(
+            client_fd,
+            "ERR 005 FILE_NOT_FOUND SID:"
+            SID
+            "\n"
+        );
+
+        return;
+    }
+
+    /*
+       Exact assignment GET response header:
+
+       OK FILE_SEND <filename> <filesize> SID:<sid>
+    */
+    snprintf(
+        response,
+        sizeof(response),
+        "OK FILE_SEND %s %lld SID:%s\n",
+        filename,
+        (long long)file_info.st_size,
+        SID
+    );
+
+    if (send_all(
+            client_fd,
+            response,
+            strlen(response)) < 0)
+    {
+        fclose(file);
+        return;
+    }
+
+    /*
+       Send exactly filesize raw bytes
+       immediately after the header.
+    */
+    size_t bytes_read;
+
+    while ((bytes_read =
+                fread(
+                    buffer,
+                    1,
+                    sizeof(buffer),
+                    file)) > 0)
+    {
+        if (send_all(
+                client_fd,
+                buffer,
+                bytes_read) < 0)
+        {
+            fclose(file);
+            return;
+        }
+    }
+
+    fclose(file);
+
+    printf(
+        "File sent: %s (%lld bytes)\n",
+        filename,
+        (long long)file_info.st_size
+    );
+}
+
+/* =================================================
    MAIN
-   ------------------------------------------------- */
+   ================================================= */
 int main(void)
 {
     int server_fd;
@@ -565,7 +762,11 @@ int main(void)
 
     /* Create TCP socket */
     server_fd =
-        socket(AF_INET, SOCK_STREAM, 0);
+        socket(
+            AF_INET,
+            SOCK_STREAM,
+            0
+        );
 
     if (server_fd < 0)
     {
@@ -573,6 +774,9 @@ int main(void)
         return 1;
     }
 
+    /*
+       Allow quick restart of Agent.
+    */
     if (setsockopt(
             server_fd,
             SOL_SOCKET,
@@ -602,6 +806,7 @@ int main(void)
     server_addr.sin_port =
         htons(PORT);
 
+    /* Bind to personalised port 9410 */
     if (bind(
             server_fd,
             (struct sockaddr *)&server_addr,
@@ -614,7 +819,9 @@ int main(void)
         return 1;
     }
 
-    if (listen(server_fd, 5) < 0)
+    if (listen(
+            server_fd,
+            5) < 0)
     {
         perror("listen");
 
@@ -632,6 +839,9 @@ int main(void)
         PORT
     );
 
+    /* =================================================
+       ACCEPT CONTROLLER CONNECTIONS
+       ================================================= */
     while (1)
     {
         client_len =
@@ -656,8 +866,7 @@ int main(void)
         );
 
         /*
-           Create buffered reader for this
-           Controller connection.
+           Buffered TCP reader for this connection.
         */
         ConnReader reader;
 
@@ -667,6 +876,9 @@ int main(void)
 
         int authenticated = 0;
 
+        /* =============================================
+           COMMAND LOOP
+           ============================================= */
         while (1)
         {
             ssize_t result =
@@ -699,9 +911,9 @@ int main(void)
                 command
             );
 
-            /* =====================================
-               AUTH
-               ===================================== */
+            /* =========================================
+               AUTHENTICATION
+               ========================================= */
             if (!authenticated)
             {
                 if (strcmp(
@@ -739,31 +951,35 @@ int main(void)
                 continue;
             }
 
-            /* =====================================
+            /* =========================================
                SYSINFO
-               ===================================== */
+               ========================================= */
             if (strcmp(
                     command,
                     "SYSINFO"
                 ) == 0)
             {
-                handle_sysinfo(client_fd);
+                handle_sysinfo(
+                    client_fd
+                );
             }
 
-            /* =====================================
+            /* =========================================
                LISTPROC
-               ===================================== */
+               ========================================= */
             else if (strcmp(
                          command,
                          "LISTPROC"
                      ) == 0)
             {
-                handle_listproc(client_fd);
+                handle_listproc(
+                    client_fd
+                );
             }
 
-            /* =====================================
+            /* =========================================
                EXEC
-               ===================================== */
+               ========================================= */
             else if (strncmp(
                          command,
                          "EXEC ",
@@ -776,11 +992,10 @@ int main(void)
                 );
             }
 
-            /* =====================================
+            /* =========================================
                PUT
-               Format:
                PUT <filename> <filesize>
-               ===================================== */
+               ========================================= */
             else if (strncmp(
                          command,
                          "PUT ",
@@ -788,12 +1003,9 @@ int main(void)
                      ) == 0)
             {
                 char filename[256];
+
                 unsigned long long filesize;
 
-                /*
-                   Parse exactly:
-                   PUT filename filesize
-                */
                 if (sscanf(
                         command + 4,
                         "%255s %llu",
@@ -818,9 +1030,42 @@ int main(void)
                 }
             }
 
-            /* =====================================
+            /* =========================================
+               GET
+               GET <filename>
+               ========================================= */
+            else if (strncmp(
+                         command,
+                         "GET ",
+                         4
+                     ) == 0)
+            {
+                char filename[256];
+
+                if (sscanf(
+                        command + 4,
+                        "%255s",
+                        filename) == 1)
+                {
+                    handle_get(
+                        client_fd,
+                        filename
+                    );
+                }
+                else
+                {
+                    send_response(
+                        client_fd,
+                        "ERR 005 FILE_NOT_FOUND SID:"
+                        SID
+                        "\n"
+                    );
+                }
+            }
+
+            /* =========================================
                QUIT
-               ===================================== */
+               ========================================= */
             else if (strcmp(
                          command,
                          "QUIT"
@@ -840,9 +1085,9 @@ int main(void)
                 break;
             }
 
-            /* =====================================
+            /* =========================================
                UNKNOWN COMMAND
-               ===================================== */
+               ========================================= */
             else
             {
                 send_response(

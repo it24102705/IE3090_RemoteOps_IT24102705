@@ -10,9 +10,9 @@
 #define PORT 9410
 #define BUFFER_SIZE 4096
 
-/* -------------------------------------------------
-   Send all bytes
-   ------------------------------------------------- */
+/* =================================================
+   SEND ALL BYTES
+   ================================================= */
 int send_all(int fd, const void *data, size_t length)
 {
     const unsigned char *ptr = data;
@@ -34,15 +34,17 @@ int send_all(int fd, const void *data, size_t length)
     return 0;
 }
 
-/* -------------------------------------------------
-   Receive one response line
-   ------------------------------------------------- */
-int receive_response(int sock_fd)
+/* =================================================
+   READ ONE RESPONSE LINE
+   ================================================= */
+int read_response_line(
+    int sock_fd,
+    char *buffer,
+    size_t buffer_size)
 {
-    char buffer[BUFFER_SIZE];
     size_t position = 0;
 
-    while (position < sizeof(buffer) - 1)
+    while (position < buffer_size - 1)
     {
         char c;
 
@@ -51,10 +53,6 @@ int receive_response(int sock_fd)
 
         if (received <= 0)
         {
-            printf(
-                "Failed to receive response from Agent.\n"
-            );
-
             return -1;
         }
 
@@ -68,6 +66,28 @@ int receive_response(int sock_fd)
 
     buffer[position] = '\0';
 
+    return 0;
+}
+
+/* =================================================
+   RECEIVE NORMAL RESPONSE
+   ================================================= */
+int receive_response(int sock_fd)
+{
+    char buffer[BUFFER_SIZE];
+
+    if (read_response_line(
+            sock_fd,
+            buffer,
+            sizeof(buffer)) < 0)
+    {
+        printf(
+            "Failed to receive response from Agent.\n"
+        );
+
+        return -1;
+    }
+
     printf(
         "Agent response: %s",
         buffer
@@ -76,9 +96,9 @@ int receive_response(int sock_fd)
     return 0;
 }
 
-/* -------------------------------------------------
-   Send normal text command
-   ------------------------------------------------- */
+/* =================================================
+   SEND NORMAL COMMAND
+   ================================================= */
 int send_command(
     int sock_fd,
     const char *command)
@@ -100,30 +120,34 @@ int send_command(
     return receive_response(sock_fd);
 }
 
-/* -------------------------------------------------
-   PUT - Upload file to Agent
-   ------------------------------------------------- */
+/* =================================================
+   PUT
+   Upload file Controller -> Agent
+   ================================================= */
 int upload_file(
     int sock_fd,
     const char *local_filename,
     const char *remote_filename)
 {
     FILE *file;
-
     struct stat file_info;
 
     char header[512];
     unsigned char buffer[BUFFER_SIZE];
 
-    /* Get file size */
-    if (stat(local_filename, &file_info) != 0)
+    if (stat(
+            local_filename,
+            &file_info) != 0)
     {
         perror("stat");
         return -1;
     }
 
     file =
-        fopen(local_filename, "rb");
+        fopen(
+            local_filename,
+            "rb"
+        );
 
     if (file == NULL)
     {
@@ -131,10 +155,6 @@ int upload_file(
         return -1;
     }
 
-    /*
-       PUT header:
-       PUT <filename> <filesize>\n
-    */
     snprintf(
         header,
         sizeof(header),
@@ -143,7 +163,6 @@ int upload_file(
         (long long)file_info.st_size
     );
 
-    /* Send PUT header */
     if (send_all(
             sock_fd,
             header,
@@ -162,7 +181,6 @@ int upload_file(
         (long long)file_info.st_size
     );
 
-    /* Send exact raw file bytes */
     size_t bytes_read;
 
     while ((bytes_read =
@@ -193,13 +211,180 @@ int upload_file(
         (long long)file_info.st_size
     );
 
-    /* Receive PUT result */
     return receive_response(sock_fd);
 }
 
-/* -------------------------------------------------
+/* =================================================
+   GET
+   Download file Agent -> Controller
+   ================================================= */
+int download_file(
+    int sock_fd,
+    const char *remote_filename,
+    const char *local_filename)
+{
+    char command[512];
+    char response[BUFFER_SIZE];
+
+    char received_filename[256];
+    char sid[64];
+
+    unsigned long long filesize;
+
+    unsigned char buffer[BUFFER_SIZE];
+
+    /* Send GET command */
+    snprintf(
+        command,
+        sizeof(command),
+        "GET %s\n",
+        remote_filename
+    );
+
+    if (send_all(
+            sock_fd,
+            command,
+            strlen(command)) < 0)
+    {
+        perror("send");
+        return -1;
+    }
+
+    printf(
+        "Sent: GET %s\n",
+        remote_filename
+    );
+
+    /*
+       First receive only the response header.
+    */
+    if (read_response_line(
+            sock_fd,
+            response,
+            sizeof(response)) < 0)
+    {
+        printf(
+            "Failed to receive GET response.\n"
+        );
+
+        return -1;
+    }
+
+    printf(
+        "Agent response: %s",
+        response
+    );
+
+    /*
+       Handle FILE_NOT_FOUND or another error.
+    */
+    if (strncmp(
+            response,
+            "ERR ",
+            4) == 0)
+    {
+        return -1;
+    }
+
+    /*
+       Expected:
+       OK FILE_SEND filename filesize SID:5072
+    */
+    if (sscanf(
+            response,
+            "OK FILE_SEND %255s %llu %63s",
+            received_filename,
+            &filesize,
+            sid) != 3)
+    {
+        printf(
+            "Invalid GET response format.\n"
+        );
+
+        return -1;
+    }
+
+    FILE *file =
+        fopen(
+            local_filename,
+            "wb"
+        );
+
+    if (file == NULL)
+    {
+        perror("fopen");
+        return -1;
+    }
+
+    /*
+       Receive exactly <filesize> raw bytes.
+    */
+    unsigned long long remaining =
+        filesize;
+
+    while (remaining > 0)
+    {
+        size_t wanted =
+            remaining < BUFFER_SIZE
+                ? (size_t)remaining
+                : BUFFER_SIZE;
+
+        ssize_t received =
+            recv(
+                sock_fd,
+                buffer,
+                wanted,
+                0
+            );
+
+        if (received <= 0)
+        {
+            printf(
+                "File download interrupted.\n"
+            );
+
+            fclose(file);
+
+            remove(local_filename);
+
+            return -1;
+        }
+
+        if (fwrite(
+                buffer,
+                1,
+                (size_t)received,
+                file) != (size_t)received)
+        {
+            printf(
+                "Failed to write downloaded file.\n"
+            );
+
+            fclose(file);
+
+            remove(local_filename);
+
+            return -1;
+        }
+
+        remaining -=
+            (unsigned long long)received;
+    }
+
+    fclose(file);
+
+    printf(
+        "File downloaded: %s (%llu bytes)\n",
+        local_filename,
+        filesize
+    );
+
+    return 0;
+}
+
+/* =================================================
    MAIN
-   ------------------------------------------------- */
+   ================================================= */
 int main(void)
 {
     int sock_fd;
@@ -210,9 +395,12 @@ int main(void)
         "RemoteOps Controller - IT24102705\n"
     );
 
-    /* Create TCP socket */
     sock_fd =
-        socket(AF_INET, SOCK_STREAM, 0);
+        socket(
+            AF_INET,
+            SOCK_STREAM,
+            0
+        );
 
     if (sock_fd < 0)
     {
@@ -220,7 +408,6 @@ int main(void)
         return 1;
     }
 
-    /* Configure Agent address */
     memset(
         &server_addr,
         0,
@@ -251,7 +438,6 @@ int main(void)
         PORT
     );
 
-    /* Connect */
     if (connect(
             sock_fd,
             (struct sockaddr *)&server_addr,
@@ -290,7 +476,7 @@ int main(void)
 
     printf("\n");
 
-    /* EXEC DATE */
+    /* EXEC allowed command */
     if (send_command(
             sock_fd,
             "EXEC DATE\n") < 0)
@@ -301,7 +487,7 @@ int main(void)
 
     printf("\n");
 
-    /* Security test */
+    /* EXEC security/error test */
     if (send_command(
             sock_fd,
             "EXEC LS\n") < 0)
@@ -312,11 +498,23 @@ int main(void)
 
     printf("\n");
 
-    /* PUT test file */
+    /* PUT */
     if (upload_file(
             sock_fd,
             "upload_test.txt",
             "upload_test.txt") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+    /* GET */
+    if (download_file(
+            sock_fd,
+            "upload_test.txt",
+            "downloaded_test.txt") < 0)
     {
         close(sock_fd);
         return 1;
