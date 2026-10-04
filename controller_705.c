@@ -5,13 +5,15 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 #define SERVER_IP "127.0.0.1"
 #define PORT 9410
+#define UDP_MONITOR_PORT 12000
 #define BUFFER_SIZE 4096
 
 /* =================================================
-   SEND ALL BYTES
+   SEND ALL TCP BYTES
    ================================================= */
 int send_all(int fd, const void *data, size_t length)
 {
@@ -21,7 +23,12 @@ int send_all(int fd, const void *data, size_t length)
     while (total < length)
     {
         ssize_t sent =
-            send(fd, ptr + total, length - total, 0);
+            send(
+                fd,
+                ptr + total,
+                length - total,
+                0
+            );
 
         if (sent <= 0)
         {
@@ -35,7 +42,7 @@ int send_all(int fd, const void *data, size_t length)
 }
 
 /* =================================================
-   READ ONE RESPONSE LINE
+   READ ONE TCP RESPONSE LINE
    ================================================= */
 int read_response_line(
     int sock_fd,
@@ -49,7 +56,12 @@ int read_response_line(
         char c;
 
         ssize_t received =
-            recv(sock_fd, &c, 1, 0);
+            recv(
+                sock_fd,
+                &c,
+                1,
+                0
+            );
 
         if (received <= 0)
         {
@@ -70,7 +82,7 @@ int read_response_line(
 }
 
 /* =================================================
-   RECEIVE NORMAL RESPONSE
+   RECEIVE NORMAL TCP RESPONSE
    ================================================= */
 int receive_response(int sock_fd)
 {
@@ -97,7 +109,7 @@ int receive_response(int sock_fd)
 }
 
 /* =================================================
-   SEND NORMAL COMMAND
+   SEND NORMAL TCP COMMAND
    ================================================= */
 int send_command(
     int sock_fd,
@@ -122,7 +134,6 @@ int send_command(
 
 /* =================================================
    PUT
-   Upload file Controller -> Agent
    ================================================= */
 int upload_file(
     int sock_fd,
@@ -130,9 +141,11 @@ int upload_file(
     const char *remote_filename)
 {
     FILE *file;
+
     struct stat file_info;
 
     char header[512];
+
     unsigned char buffer[BUFFER_SIZE];
 
     if (stat(
@@ -216,7 +229,6 @@ int upload_file(
 
 /* =================================================
    GET
-   Download file Agent -> Controller
    ================================================= */
 int download_file(
     int sock_fd,
@@ -233,7 +245,6 @@ int download_file(
 
     unsigned char buffer[BUFFER_SIZE];
 
-    /* Send GET command */
     snprintf(
         command,
         sizeof(command),
@@ -255,9 +266,6 @@ int download_file(
         remote_filename
     );
 
-    /*
-       First receive only the response header.
-    */
     if (read_response_line(
             sock_fd,
             response,
@@ -275,9 +283,6 @@ int download_file(
         response
     );
 
-    /*
-       Handle FILE_NOT_FOUND or another error.
-    */
     if (strncmp(
             response,
             "ERR ",
@@ -286,10 +291,6 @@ int download_file(
         return -1;
     }
 
-    /*
-       Expected:
-       OK FILE_SEND filename filesize SID:5072
-    */
     if (sscanf(
             response,
             "OK FILE_SEND %255s %llu %63s",
@@ -316,9 +317,6 @@ int download_file(
         return -1;
     }
 
-    /*
-       Receive exactly <filesize> raw bytes.
-    */
     unsigned long long remaining =
         filesize;
 
@@ -378,6 +376,147 @@ int download_file(
         local_filename,
         filesize
     );
+
+    return 0;
+}
+
+/* =================================================
+   UDP MONITOR TEST
+   ================================================= */
+int run_udp_monitor(int tcp_fd)
+{
+    int udp_fd;
+
+    struct sockaddr_in udp_addr;
+
+    char command[128];
+    char buffer[BUFFER_SIZE];
+
+    udp_fd =
+        socket(
+            AF_INET,
+            SOCK_DGRAM,
+            0
+        );
+
+    if (udp_fd < 0)
+    {
+        perror("UDP socket");
+        return -1;
+    }
+
+    memset(
+        &udp_addr,
+        0,
+        sizeof(udp_addr)
+    );
+
+    udp_addr.sin_family =
+        AF_INET;
+
+    udp_addr.sin_addr.s_addr =
+        INADDR_ANY;
+
+    udp_addr.sin_port =
+        htons(UDP_MONITOR_PORT);
+
+    if (bind(
+            udp_fd,
+            (struct sockaddr *)&udp_addr,
+            sizeof(udp_addr)) < 0)
+    {
+        perror("UDP bind");
+
+        close(udp_fd);
+
+        return -1;
+    }
+
+    /*
+       Prevent UDP receive from waiting forever.
+    */
+    struct timeval timeout;
+
+    timeout.tv_sec = 10;
+    timeout.tv_usec = 0;
+
+    setsockopt(
+        udp_fd,
+        SOL_SOCKET,
+        SO_RCVTIMEO,
+        &timeout,
+        sizeof(timeout)
+    );
+
+    snprintf(
+        command,
+        sizeof(command),
+        "MONITOR START %d\n",
+        UDP_MONITOR_PORT
+    );
+
+    if (send_command(
+            tcp_fd,
+            command) < 0)
+    {
+        close(udp_fd);
+        return -1;
+    }
+
+    printf(
+        "\nWaiting for UDP monitoring data...\n"
+    );
+
+    /*
+       Receive three UDP SYSINFO datagrams.
+       Agent interval = 5 seconds.
+    */
+    for (int i = 1; i <= 3; i++)
+    {
+        ssize_t received =
+            recvfrom(
+                udp_fd,
+                buffer,
+                sizeof(buffer) - 1,
+                0,
+                NULL,
+                NULL
+            );
+
+        if (received < 0)
+        {
+            perror("UDP recvfrom");
+
+            send_command(
+                tcp_fd,
+                "MONITOR STOP\n"
+            );
+
+            close(udp_fd);
+
+            return -1;
+        }
+
+        buffer[received] = '\0';
+
+        printf(
+            "UDP Monitor #%d: %s\n",
+            i,
+            buffer
+        );
+    }
+
+    printf("\n");
+
+    if (send_command(
+            tcp_fd,
+            "MONITOR STOP\n") < 0)
+    {
+        close(udp_fd);
+        return -1;
+    }
+
+    close(udp_fd);
 
     return 0;
 }
@@ -476,7 +615,7 @@ int main(void)
 
     printf("\n");
 
-    /* EXEC allowed command */
+    /* EXEC ALLOWED */
     if (send_command(
             sock_fd,
             "EXEC DATE\n") < 0)
@@ -487,7 +626,7 @@ int main(void)
 
     printf("\n");
 
-    /* EXEC security/error test */
+    /* EXEC NOT ALLOWED */
     if (send_command(
             sock_fd,
             "EXEC LS\n") < 0)
@@ -515,6 +654,16 @@ int main(void)
             sock_fd,
             "upload_test.txt",
             "downloaded_test.txt") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+    /* UDP MONITOR */
+    if (run_udp_monitor(
+            sock_fd) < 0)
     {
         close(sock_fd);
         return 1;

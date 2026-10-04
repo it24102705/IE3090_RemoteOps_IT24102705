@@ -17,6 +17,8 @@
 #define STORAGE_DIR "./agentfiles/IT24102705"
 #define MAX_FILE_SIZE (10 * 1024 * 1024)
 
+#define MONITOR_INTERVAL 5
+
 /* =================================================
    BUFFERED TCP READER
    ================================================= */
@@ -29,20 +31,45 @@ typedef struct
 } ConnReader;
 
 /* =================================================
-   INFORMATION PASSED TO EACH CLIENT THREAD
+   UDP MONITOR INFORMATION
+   One monitor belongs to one Controller session.
+   ================================================= */
+typedef struct
+{
+    pthread_t thread_id;
+
+    pthread_mutex_t mutex;
+
+    int active;
+    int thread_running;
+
+    struct in_addr controller_ip;
+
+    int udp_port;
+} MonitorContext;
+
+/* =================================================
+   CONTROLLER SESSION
    ================================================= */
 typedef struct
 {
     int client_fd;
+
     struct sockaddr_in client_addr;
+
+    MonitorContext monitor;
 } ClientSession;
 
 /* =================================================
-   SEND ALL BYTES
+   SEND ALL TCP BYTES
    ================================================= */
-int send_all(int fd, const void *data, size_t length)
+int send_all(
+    int fd,
+    const void *data,
+    size_t length)
 {
     const unsigned char *ptr = data;
+
     size_t total = 0;
 
     while (total < length)
@@ -95,7 +122,9 @@ ssize_t read_line(
         while (reader->start < reader->end)
         {
             unsigned char c =
-                reader->buffer[reader->start++];
+                reader->buffer[
+                    reader->start++
+                ];
 
             if (c == '\n')
             {
@@ -159,7 +188,8 @@ int read_exact(
                     : remaining;
 
             if (fwrite(
-                    reader->buffer + reader->start,
+                    reader->buffer
+                        + reader->start,
                     1,
                     amount,
                     file) != amount)
@@ -211,7 +241,8 @@ int read_exact(
 /* =================================================
    SAFE FILENAME CHECK
    ================================================= */
-int valid_filename(const char *filename)
+int valid_filename(
+    const char *filename)
 {
     if (filename == NULL ||
         filename[0] == '\0')
@@ -219,13 +250,19 @@ int valid_filename(const char *filename)
         return 0;
     }
 
-    if (strstr(filename, "..") != NULL)
+    if (strstr(
+            filename,
+            "..") != NULL)
     {
         return 0;
     }
 
-    if (strchr(filename, '/') != NULL ||
-        strchr(filename, '\\') != NULL)
+    if (strchr(
+            filename,
+            '/') != NULL ||
+        strchr(
+            filename,
+            '\\') != NULL)
     {
         return 0;
     }
@@ -234,24 +271,23 @@ int valid_filename(const char *filename)
 }
 
 /* =================================================
-   SYSINFO
+   GET SYSTEM INFORMATION
+
+   Used by both TCP SYSINFO and UDP monitor.
    ================================================= */
-void handle_sysinfo(int client_fd)
+int get_system_info(
+    double *cpu_load,
+    unsigned long *mem_used_mb,
+    long *uptime_sec)
 {
     struct sysinfo info;
-    char response[BUFFER_SIZE];
 
     if (sysinfo(&info) != 0)
     {
-        send_response(
-            client_fd,
-            "ERR 006 SYSINFO_FAILED SID:" SID "\n"
-        );
-
-        return;
+        return -1;
     }
 
-    double cpu_load =
+    *cpu_load =
         (double)info.loads[0] / 65536.0;
 
     unsigned long total_ram =
@@ -260,9 +296,44 @@ void handle_sysinfo(int client_fd)
     unsigned long free_ram =
         info.freeram * info.mem_unit;
 
-    unsigned long mem_used_mb =
+    *mem_used_mb =
         (total_ram - free_ram) /
         (1024 * 1024);
+
+    *uptime_sec =
+        info.uptime;
+
+    return 0;
+}
+
+/* =================================================
+   SYSINFO
+   ================================================= */
+void handle_sysinfo(
+    int client_fd)
+{
+    double cpu_load;
+
+    unsigned long mem_used_mb;
+
+    long uptime_sec;
+
+    char response[BUFFER_SIZE];
+
+    if (get_system_info(
+            &cpu_load,
+            &mem_used_mb,
+            &uptime_sec) != 0)
+    {
+        send_response(
+            client_fd,
+            "ERR 006 SYSINFO_FAILED SID:"
+            SID
+            "\n"
+        );
+
+        return;
+    }
 
     snprintf(
         response,
@@ -270,7 +341,7 @@ void handle_sysinfo(int client_fd)
         "OK SYSINFO %.2f %lu %ld SID:%s\n",
         cpu_load,
         mem_used_mb,
-        info.uptime,
+        uptime_sec,
         SID
     );
 
@@ -283,9 +354,11 @@ void handle_sysinfo(int client_fd)
 /* =================================================
    LISTPROC
    ================================================= */
-void handle_listproc(int client_fd)
+void handle_listproc(
+    int client_fd)
 {
     FILE *fp;
+
     char line[128];
     char response[BUFFER_SIZE];
 
@@ -303,7 +376,9 @@ void handle_listproc(int client_fd)
     {
         send_response(
             client_fd,
-            "ERR 007 LISTPROC_FAILED SID:" SID "\n"
+            "ERR 007 LISTPROC_FAILED SID:"
+            SID
+            "\n"
         );
 
         return;
@@ -327,8 +402,15 @@ void handle_listproc(int client_fd)
             break;
         }
 
-        strcat(response, line);
-        strcat(response, ",");
+        strcat(
+            response,
+            line
+        );
+
+        strcat(
+            response,
+            ","
+        );
     }
 
     pclose(fp);
@@ -363,6 +445,7 @@ void handle_exec(
     const char *shell_command = NULL;
 
     FILE *fp;
+
     char line[256];
     char output[BUFFER_SIZE];
     char response[BUFFER_SIZE];
@@ -445,8 +528,15 @@ void handle_exec(
             break;
         }
 
-        strcat(output, line);
-        strcat(output, " ");
+        strcat(
+            output,
+            line
+        );
+
+        strcat(
+            output,
+            " "
+        );
     }
 
     pclose(fp);
@@ -552,6 +642,7 @@ void handle_put(
             filesize) != 0)
     {
         fclose(file);
+
         remove(filepath);
 
         send_response(
@@ -699,13 +790,309 @@ void handle_get(
 }
 
 /* =================================================
-   CONTROLLER THREAD
-
-   Every connected Controller gets its own thread.
-   Therefore multiple Controllers can operate
-   simultaneously.
+   CHECK MONITOR ACTIVE STATE
    ================================================= */
-void *handle_client(void *arg)
+int monitor_is_active(
+    MonitorContext *monitor)
+{
+    int active;
+
+    pthread_mutex_lock(
+        &monitor->mutex
+    );
+
+    active =
+        monitor->active;
+
+    pthread_mutex_unlock(
+        &monitor->mutex
+    );
+
+    return active;
+}
+
+/* =================================================
+   UDP MONITOR THREAD
+   ================================================= */
+void *udp_monitor_thread(
+    void *arg)
+{
+    MonitorContext *monitor =
+        (MonitorContext *)arg;
+
+    int udp_fd =
+        socket(
+            AF_INET,
+            SOCK_DGRAM,
+            0
+        );
+
+    if (udp_fd < 0)
+    {
+        perror("UDP socket");
+
+        pthread_mutex_lock(
+            &monitor->mutex
+        );
+
+        monitor->active = 0;
+        monitor->thread_running = 0;
+
+        pthread_mutex_unlock(
+            &monitor->mutex
+        );
+
+        return NULL;
+    }
+
+    struct sockaddr_in destination;
+
+    memset(
+        &destination,
+        0,
+        sizeof(destination)
+    );
+
+    destination.sin_family =
+        AF_INET;
+
+    destination.sin_addr =
+        monitor->controller_ip;
+
+    destination.sin_port =
+        htons(
+            (unsigned short)
+            monitor->udp_port
+        );
+
+    /*
+       Send first datagram immediately.
+       Then send one every 5 seconds.
+    */
+    while (monitor_is_active(
+               monitor))
+    {
+        double cpu_load;
+
+        unsigned long mem_used_mb;
+
+        long uptime_sec;
+
+        char message[BUFFER_SIZE];
+
+        if (get_system_info(
+                &cpu_load,
+                &mem_used_mb,
+                &uptime_sec) == 0)
+        {
+            snprintf(
+                message,
+                sizeof(message),
+                "SYSINFO %.2f %lu %ld SID:%s",
+                cpu_load,
+                mem_used_mb,
+                uptime_sec,
+                SID
+            );
+
+            sendto(
+                udp_fd,
+                message,
+                strlen(message),
+                0,
+                (struct sockaddr *)&destination,
+                sizeof(destination)
+            );
+        }
+
+        /*
+           Sleep as five 1-second periods.
+           This lets MONITOR STOP respond
+           faster than one full 5-second sleep.
+        */
+        for (int i = 0;
+             i < MONITOR_INTERVAL;
+             i++)
+        {
+            if (!monitor_is_active(
+                    monitor))
+            {
+                break;
+            }
+
+            sleep(1);
+        }
+    }
+
+    close(udp_fd);
+
+    pthread_mutex_lock(
+        &monitor->mutex
+    );
+
+    monitor->thread_running = 0;
+
+    pthread_mutex_unlock(
+        &monitor->mutex
+    );
+
+    return NULL;
+}
+
+/* =================================================
+   MONITOR START
+   ================================================= */
+void handle_monitor_start(
+    int client_fd,
+    ClientSession *session,
+    int udp_port)
+{
+    /*
+       UDP port must be valid.
+    */
+    if (udp_port < 1 ||
+        udp_port > 65535)
+    {
+        send_response(
+            client_fd,
+            "ERR 012 INVALID_UDP_PORT SID:"
+            SID
+            "\n"
+        );
+
+        return;
+    }
+
+    pthread_mutex_lock(
+        &session->monitor.mutex
+    );
+
+    /*
+       Do not create a second monitor for the
+       same Controller session.
+    */
+    if (session->monitor.active ||
+        session->monitor.thread_running)
+    {
+        pthread_mutex_unlock(
+            &session->monitor.mutex
+        );
+
+        send_response(
+            client_fd,
+            "ERR 013 MONITOR_ALREADY_RUNNING SID:"
+            SID
+            "\n"
+        );
+
+        return;
+    }
+
+    session->monitor.active = 1;
+    session->monitor.thread_running = 1;
+
+    session->monitor.controller_ip =
+        session->client_addr.sin_addr;
+
+    session->monitor.udp_port =
+        udp_port;
+
+    pthread_mutex_unlock(
+        &session->monitor.mutex
+    );
+
+    if (pthread_create(
+            &session->monitor.thread_id,
+            NULL,
+            udp_monitor_thread,
+            &session->monitor) != 0)
+    {
+        pthread_mutex_lock(
+            &session->monitor.mutex
+        );
+
+        session->monitor.active = 0;
+        session->monitor.thread_running = 0;
+
+        pthread_mutex_unlock(
+            &session->monitor.mutex
+        );
+
+        send_response(
+            client_fd,
+            "ERR 014 MONITOR_START_FAILED SID:"
+            SID
+            "\n"
+        );
+
+        return;
+    }
+
+    send_response(
+        client_fd,
+        "OK MONITOR_STARTED SID:"
+        SID
+        "\n"
+    );
+
+    printf(
+        "UDP monitor started for port %d.\n",
+        udp_port
+    );
+}
+
+/* =================================================
+   STOP UDP MONITOR
+
+   send_reply = 1 for MONITOR STOP
+   send_reply = 0 for QUIT/disconnect cleanup
+   ================================================= */
+void stop_monitor(
+    int client_fd,
+    ClientSession *session,
+    int send_reply)
+{
+    int should_join = 0;
+
+    pthread_mutex_lock(
+        &session->monitor.mutex
+    );
+
+    if (session->monitor.active ||
+        session->monitor.thread_running)
+    {
+        session->monitor.active = 0;
+        should_join = 1;
+    }
+
+    pthread_mutex_unlock(
+        &session->monitor.mutex
+    );
+
+    if (should_join)
+    {
+        pthread_join(
+            session->monitor.thread_id,
+            NULL
+        );
+    }
+
+    if (send_reply)
+    {
+        send_response(
+            client_fd,
+            "OK MONITOR_STOPPED SID:"
+            SID
+            "\n"
+        );
+    }
+}
+
+/* =================================================
+   CONTROLLER THREAD
+   ================================================= */
+void *handle_client(
+    void *arg)
 {
     ClientSession *session =
         (ClientSession *)arg;
@@ -713,20 +1100,11 @@ void *handle_client(void *arg)
     int client_fd =
         session->client_fd;
 
-    struct sockaddr_in client_addr =
-        session->client_addr;
-
-    /*
-       We no longer need the dynamically allocated
-       ClientSession structure.
-    */
-    free(session);
-
     char client_ip[INET_ADDRSTRLEN];
 
     inet_ntop(
         AF_INET,
-        &client_addr.sin_addr,
+        &session->client_addr.sin_addr,
         client_ip,
         sizeof(client_ip)
     );
@@ -736,11 +1114,6 @@ void *handle_client(void *arg)
         client_ip
     );
 
-    /*
-       IMPORTANT:
-       Authentication is local to this thread.
-       Each Controller must authenticate separately.
-    */
     int authenticated = 0;
 
     ConnReader reader;
@@ -787,7 +1160,7 @@ void *handle_client(void *arg)
         );
 
         /* =========================================
-           AUTHENTICATION
+           AUTH
            ========================================= */
         if (!authenticated)
         {
@@ -939,6 +1312,54 @@ void *handle_client(void *arg)
         }
 
         /* =========================================
+           MONITOR START <udp_port>
+           ========================================= */
+        else if (strncmp(
+                     command,
+                     "MONITOR START ",
+                     14
+                 ) == 0)
+        {
+            int udp_port;
+
+            if (sscanf(
+                    command + 14,
+                    "%d",
+                    &udp_port) == 1)
+            {
+                handle_monitor_start(
+                    client_fd,
+                    session,
+                    udp_port
+                );
+            }
+            else
+            {
+                send_response(
+                    client_fd,
+                    "ERR 012 INVALID_UDP_PORT SID:"
+                    SID
+                    "\n"
+                );
+            }
+        }
+
+        /* =========================================
+           MONITOR STOP
+           ========================================= */
+        else if (strcmp(
+                     command,
+                     "MONITOR STOP"
+                 ) == 0)
+        {
+            stop_monitor(
+                client_fd,
+                session,
+                1
+            );
+        }
+
+        /* =========================================
            QUIT
            ========================================= */
         else if (strcmp(
@@ -946,6 +1367,15 @@ void *handle_client(void *arg)
                      "QUIT"
                  ) == 0)
         {
+            /*
+               Stop monitoring before closing TCP.
+            */
+            stop_monitor(
+                client_fd,
+                session,
+                0
+            );
+
             send_response(
                 client_fd,
                 "OK BYE SID:"
@@ -975,12 +1405,28 @@ void *handle_client(void *arg)
         }
     }
 
+    /*
+       Also stop UDP monitoring if Controller
+       disconnects without sending QUIT.
+    */
+    stop_monitor(
+        client_fd,
+        session,
+        0
+    );
+
     close(client_fd);
+
+    pthread_mutex_destroy(
+        &session->monitor.mutex
+    );
 
     printf(
         "Controller %s connection closed.\n",
         client_ip
     );
+
+    free(session);
 
     return NULL;
 }
@@ -996,9 +1442,8 @@ int main(void)
     struct sockaddr_in server_addr;
 
     /*
-       Prevent Agent process from terminating if
-       a Controller disconnects unexpectedly while
-       the Agent is sending data.
+       Prevent whole Agent from terminating if
+       a Controller disconnects unexpectedly.
     */
     signal(
         SIGPIPE,
@@ -1060,8 +1505,7 @@ int main(void)
     }
 
     /*
-       Backlog of 10 allows pending connections
-       while worker threads handle active clients.
+       Backlog larger than required 5 Controllers.
     */
     if (listen(
             server_fd,
@@ -1087,13 +1531,20 @@ int main(void)
         "Concurrent Controller support enabled.\n"
     );
 
+    printf(
+        "UDP monitoring interval: %d seconds.\n",
+        MONITOR_INTERVAL
+    );
+
     /* =================================================
        ACCEPT LOOP
        ================================================= */
     while (1)
     {
         ClientSession *session =
-            malloc(sizeof(ClientSession));
+            malloc(
+                sizeof(ClientSession)
+            );
 
         if (session == NULL)
         {
@@ -1101,13 +1552,20 @@ int main(void)
             continue;
         }
 
+        memset(
+            session,
+            0,
+            sizeof(ClientSession)
+        );
+
         socklen_t client_len =
             sizeof(session->client_addr);
 
         session->client_fd =
             accept(
                 server_fd,
-                (struct sockaddr *)&session->client_addr,
+                (struct sockaddr *)
+                    &session->client_addr,
                 &client_len
             );
 
@@ -1120,32 +1578,46 @@ int main(void)
             continue;
         }
 
-        pthread_t thread_id;
-
         /*
-           Create one worker thread for this
+           Initialize monitor state for this
            Controller connection.
         */
+        pthread_mutex_init(
+            &session->monitor.mutex,
+            NULL
+        );
+
+        session->monitor.active = 0;
+        session->monitor.thread_running = 0;
+
+        pthread_t client_thread;
+
         if (pthread_create(
-                &thread_id,
+                &client_thread,
                 NULL,
                 handle_client,
                 session) != 0)
         {
             perror("pthread_create");
 
-            close(session->client_fd);
+            pthread_mutex_destroy(
+                &session->monitor.mutex
+            );
+
+            close(
+                session->client_fd
+            );
+
             free(session);
 
             continue;
         }
 
         /*
-           Detached thread cleans up automatically
-           when Controller session finishes.
+           Client thread cleans itself up.
         */
         pthread_detach(
-            thread_id
+            client_thread
         );
     }
 
