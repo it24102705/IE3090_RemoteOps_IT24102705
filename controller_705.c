@@ -9,7 +9,7 @@
 #define PORT 9410
 #define BUFFER_SIZE 4096
 
-/* Send a command and receive one response */
+/* Send a command and receive Agent response */
 int send_command(int sock_fd, const char *command)
 {
     char buffer[BUFFER_SIZE];
@@ -25,10 +25,12 @@ int send_command(int sock_fd, const char *command)
     memset(buffer, 0, sizeof(buffer));
 
     ssize_t bytes_received =
-        recv(sock_fd,
-             buffer,
-             sizeof(buffer) - 1,
-             0);
+        recv(
+            sock_fd,
+            buffer,
+            sizeof(buffer) - 1,
+            0
+        );
 
     if (bytes_received <= 0)
     {
@@ -65,33 +67,41 @@ int main(void)
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PORT);
 
-    if (inet_pton(AF_INET,
-                  SERVER_IP,
-                  &server_addr.sin_addr) <= 0)
+    if (inet_pton(
+            AF_INET,
+            SERVER_IP,
+            &server_addr.sin_addr) <= 0)
     {
         perror("inet_pton");
         close(sock_fd);
         return 1;
     }
 
-    printf("Connecting to Agent %s:%d...\n",
-           SERVER_IP, PORT);
+    printf(
+        "Connecting to Agent %s:%d...\n",
+        SERVER_IP,
+        PORT
+    );
 
     /* Connect to Agent */
-    if (connect(sock_fd,
-                (struct sockaddr *)&server_addr,
-                sizeof(server_addr)) < 0)
+    if (connect(
+            sock_fd,
+            (struct sockaddr *)&server_addr,
+            sizeof(server_addr)) < 0)
     {
         perror("connect");
         close(sock_fd);
         return 1;
     }
 
-    printf("Connected to RemoteOps Agent successfully.\n\n");
+    printf(
+        "Connected to RemoteOps Agent successfully.\n\n"
+    );
 
-    /* 1. Authenticate */
-    if (send_command(sock_fd,
-                     "AUTH OPS-2705\n") < 0)
+    /* AUTH */
+    if (send_command(
+            sock_fd,
+            "AUTH OPS-2705\n") < 0)
     {
         close(sock_fd);
         return 1;
@@ -99,9 +109,10 @@ int main(void)
 
     printf("\n");
 
-    /* 2. Request system information */
-    if (send_command(sock_fd,
-                     "SYSINFO\n") < 0)
+    /* SYSINFO */
+    if (send_command(
+            sock_fd,
+            "SYSINFO\n") < 0)
     {
         close(sock_fd);
         return 1;
@@ -109,9 +120,14 @@ int main(void)
 
     printf("\n");
 
-    /* 3. Request process list */
-    if (send_command(sock_fd,
-                     "LISTPROC\n") < 0)
+    /*
+       EXEC tests
+    */
+
+    /* DATE */
+    if (send_command(
+            sock_fd,
+            "EXEC DATE\n") < 0)
     {
         close(sock_fd);
         return 1;
@@ -119,9 +135,58 @@ int main(void)
 
     printf("\n");
 
-    /* 4. Graceful disconnect */
-    if (send_command(sock_fd,
-                     "QUIT\n") < 0)
+    /* UPTIME */
+    if (send_command(
+            sock_fd,
+            "EXEC UPTIME\n") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+    /* HOSTNAME */
+    if (send_command(
+            sock_fd,
+            "EXEC HOSTNAME\n") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+    /* WHOAMI */
+    if (send_command(
+            sock_fd,
+            "EXEC WHOAMI\n") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+    /*
+       Security test:
+       This command is NOT in the whitelist.
+       Agent must reject it.
+    */
+    if (send_command(
+            sock_fd,
+            "EXEC LS\n") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+    /* QUIT */
+    if (send_command(
+            sock_fd,
+            "QUIT\n") < 0)
     {
         close(sock_fd);
         return 1;

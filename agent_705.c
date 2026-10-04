@@ -11,9 +11,7 @@
 #define SID "5072"
 #define BUFFER_SIZE 4096
 
-/* -------------------------------------------------
-   Send a response to the Controller
-   ------------------------------------------------- */
+/* Send response to Controller */
 void send_response(int client_fd, const char *message)
 {
     send(client_fd, message, strlen(message), 0);
@@ -21,10 +19,6 @@ void send_response(int client_fd, const char *message)
 
 /* -------------------------------------------------
    SYSINFO
-   Returns:
-   CPU load
-   Memory used in MB
-   System uptime in seconds
    ------------------------------------------------- */
 void handle_sysinfo(int client_fd)
 {
@@ -33,7 +27,6 @@ void handle_sysinfo(int client_fd)
     unsigned long mem_used_mb;
     unsigned long total_ram;
     unsigned long free_ram;
-
     char response[BUFFER_SIZE];
 
     if (sysinfo(&info) != 0)
@@ -42,31 +35,21 @@ void handle_sysinfo(int client_fd)
             client_fd,
             "ERR 006 SYSINFO_FAILED SID:" SID "\n"
         );
-
         return;
     }
 
-    /* 1-minute system load average */
-    cpu_load =
-        (double)info.loads[0] / 65536.0;
+    cpu_load = (double)info.loads[0] / 65536.0;
 
-    /* Calculate RAM usage */
-    total_ram =
-        info.totalram * info.mem_unit;
-
-    free_ram =
-        info.freeram * info.mem_unit;
+    total_ram = info.totalram * info.mem_unit;
+    free_ram = info.freeram * info.mem_unit;
 
     mem_used_mb =
-        (total_ram - free_ram) /
-        (1024 * 1024);
+        (total_ram - free_ram) / (1024 * 1024);
 
     snprintf(
         response,
         sizeof(response),
-
         "OK SYSINFO %.2f %lu %ld SID:%s\n",
-
         cpu_load,
         mem_used_mb,
         info.uptime,
@@ -78,21 +61,15 @@ void handle_sysinfo(int client_fd)
 
 /* -------------------------------------------------
    LISTPROC
-   Returns a snapshot of currently running processes
    ------------------------------------------------- */
 void handle_listproc(int client_fd)
 {
     FILE *fp;
-
     char line[128];
     char response[BUFFER_SIZE];
 
     strcpy(response, "OK PROCS ");
 
-    /*
-       Get PID and process command name
-       from the Linux ps command.
-    */
     fp = popen(
         "ps -eo pid,comm --no-headers",
         "r"
@@ -104,19 +81,13 @@ void handle_listproc(int client_fd)
             client_fd,
             "ERR 007 LISTPROC_FAILED SID:" SID "\n"
         );
-
         return;
     }
 
     while (fgets(line, sizeof(line), fp) != NULL)
     {
-        /* Remove newline */
         line[strcspn(line, "\r\n")] = '\0';
 
-        /*
-           Ensure that we do not overflow
-           the response buffer.
-        */
         if (strlen(response)
             + strlen(line)
             + strlen(" SID:" SID "\n")
@@ -132,18 +103,117 @@ void handle_listproc(int client_fd)
 
     pclose(fp);
 
-    /* Remove final comma */
     size_t len = strlen(response);
 
-    if (len > 0 &&
-        response[len - 1] == ',')
+    if (len > 0 && response[len - 1] == ',')
     {
         response[len - 1] = '\0';
     }
 
-    strcat(
+    strcat(response, " SID:" SID "\n");
+
+    send_response(client_fd, response);
+}
+
+/* -------------------------------------------------
+   EXEC
+   Only approved commands are allowed
+   ------------------------------------------------- */
+void handle_exec(int client_fd, const char *exec_command)
+{
+    const char *shell_command = NULL;
+
+    FILE *fp;
+    char line[256];
+    char output[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+
+    /*
+       Whitelist check.
+       Controller input is never executed directly.
+    */
+    if (strcmp(exec_command, "DATE") == 0)
+    {
+        shell_command = "date";
+    }
+    else if (strcmp(exec_command, "UPTIME") == 0)
+    {
+        shell_command = "uptime";
+    }
+    else if (strcmp(exec_command, "DISKFREE") == 0)
+    {
+        shell_command = "df -h";
+    }
+    else if (strcmp(exec_command, "HOSTNAME") == 0)
+    {
+        shell_command = "hostname";
+    }
+    else if (strcmp(exec_command, "WHOAMI") == 0)
+    {
+        shell_command = "whoami";
+    }
+    else
+    {
+        send_response(
+            client_fd,
+            "ERR 002 COMMAND_NOT_ALLOWED SID:" SID "\n"
+        );
+        return;
+    }
+
+    output[0] = '\0';
+
+    fp = popen(shell_command, "r");
+
+    if (fp == NULL)
+    {
+        send_response(
+            client_fd,
+            "ERR 008 EXEC_FAILED SID:" SID "\n"
+        );
+        return;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        /*
+           Protocol responses are line-based.
+           Convert command output newlines to spaces.
+        */
+        line[strcspn(line, "\r\n")] = '\0';
+
+        if (strlen(output)
+            + strlen(line)
+            + 2
+            >= sizeof(output))
+        {
+            break;
+        }
+
+        strcat(output, line);
+        strcat(output, " ");
+    }
+
+    pclose(fp);
+
+    /* Remove final space */
+    size_t len = strlen(output);
+
+    if (len > 0 && output[len - 1] == ' ')
+    {
+        output[len - 1] = '\0';
+    }
+
+    /*
+       Limit EXEC output to 4000 characters.
+       This prevents response buffer truncation.
+    */
+    snprintf(
         response,
-        " SID:" SID "\n"
+        sizeof(response),
+        "OK EXEC %.4000s SID:%s\n",
+        output,
+        SID
     );
 
     send_response(client_fd, response);
@@ -165,11 +235,8 @@ int main(void)
 
     char buffer[BUFFER_SIZE];
 
-    /* -------------------------------------------------
-       Create TCP socket
-       ------------------------------------------------- */
-    server_fd =
-        socket(AF_INET, SOCK_STREAM, 0);
+    /* Create TCP socket */
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (server_fd < 0)
     {
@@ -177,10 +244,7 @@ int main(void)
         return 1;
     }
 
-    /*
-       Allow port 9410 to be reused quickly
-       after restarting the Agent.
-    */
+    /* Allow Agent to restart on same port */
     if (setsockopt(
             server_fd,
             SOL_SOCKET,
@@ -189,77 +253,48 @@ int main(void)
             sizeof(opt)) < 0)
     {
         perror("setsockopt");
-
         close(server_fd);
-
         return 1;
     }
 
-    /* -------------------------------------------------
-       Configure server address
-       ------------------------------------------------- */
+    /* Configure Agent address */
     memset(
         &server_addr,
         0,
         sizeof(server_addr)
     );
 
-    server_addr.sin_family =
-        AF_INET;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(PORT);
 
-    server_addr.sin_addr.s_addr =
-        INADDR_ANY;
-
-    server_addr.sin_port =
-        htons(PORT);
-
-    /* -------------------------------------------------
-       Bind Agent to personalised port 9410
-       ------------------------------------------------- */
+    /* Bind to personalised TCP port 9410 */
     if (bind(
             server_fd,
             (struct sockaddr *)&server_addr,
             sizeof(server_addr)) < 0)
     {
         perror("bind");
-
         close(server_fd);
-
         return 1;
     }
 
-    /* -------------------------------------------------
-       Listen for Controller connections
-       ------------------------------------------------- */
+    /* Listen for Controller connections */
     if (listen(server_fd, 5) < 0)
     {
         perror("listen");
-
         close(server_fd);
-
         return 1;
     }
 
-    printf(
-        "RemoteOps Agent - IT24102705\n"
-    );
+    printf("RemoteOps Agent - IT24102705\n");
+    printf("Agent listening on TCP port %d...\n", PORT);
 
-    printf(
-        "Agent listening on TCP port %d...\n",
-        PORT
-    );
-
-    /* -------------------------------------------------
-       Main server loop
-       ------------------------------------------------- */
+    /* Main Agent loop */
     while (1)
     {
-        client_len =
-            sizeof(client_addr);
+        client_len = sizeof(client_addr);
 
-        /*
-           Wait for Controller connection
-        */
         client_fd =
             accept(
                 server_fd,
@@ -278,15 +313,9 @@ int main(void)
             inet_ntoa(client_addr.sin_addr)
         );
 
-        /*
-           Each new Controller must
-           authenticate again.
-        */
         int authenticated = 0;
 
-        /* -------------------------------------------------
-           Controller command loop
-           ------------------------------------------------- */
+        /* Controller command loop */
         while (1)
         {
             memset(
@@ -303,25 +332,17 @@ int main(void)
                     0
                 );
 
-            /*
-               Controller disconnected or
-               connection failed.
-            */
             if (bytes_received <= 0)
             {
                 printf(
                     "Controller disconnected.\n"
                 );
-
                 break;
             }
 
-            buffer[bytes_received] =
-                '\0';
+            buffer[bytes_received] = '\0';
 
-            /*
-               Remove newline characters.
-            */
+            /* Remove newline */
             buffer[
                 strcspn(buffer, "\r\n")
             ] = '\0';
@@ -331,10 +352,9 @@ int main(void)
                 buffer
             );
 
-            /* =============================================
-               AUTHENTICATION
-               ============================================= */
-
+            /* =========================================
+               AUTH
+               ========================================= */
             if (!authenticated)
             {
                 if (strcmp(
@@ -372,42 +392,37 @@ int main(void)
                 continue;
             }
 
-            /* =============================================
+            /* =========================================
                SYSINFO
-               ============================================= */
-
-            if (strcmp(
-                    buffer,
-                    "SYSINFO"
-                ) == 0)
+               ========================================= */
+            if (strcmp(buffer, "SYSINFO") == 0)
             {
-                handle_sysinfo(
-                    client_fd
-                );
+                handle_sysinfo(client_fd);
             }
 
-            /* =============================================
+            /* =========================================
                LISTPROC
-               ============================================= */
-
-            else if (strcmp(
-                         buffer,
-                         "LISTPROC"
-                     ) == 0)
+               ========================================= */
+            else if (strcmp(buffer, "LISTPROC") == 0)
             {
-                handle_listproc(
-                    client_fd
+                handle_listproc(client_fd);
+            }
+
+            /* =========================================
+               EXEC
+               ========================================= */
+            else if (strncmp(buffer, "EXEC ", 5) == 0)
+            {
+                handle_exec(
+                    client_fd,
+                    buffer + 5
                 );
             }
 
-            /* =============================================
+            /* =========================================
                QUIT
-               ============================================= */
-
-            else if (strcmp(
-                         buffer,
-                         "QUIT"
-                     ) == 0)
+               ========================================= */
+            else if (strcmp(buffer, "QUIT") == 0)
             {
                 send_response(
                     client_fd,
@@ -423,10 +438,9 @@ int main(void)
                 break;
             }
 
-            /* =============================================
+            /* =========================================
                UNKNOWN COMMAND
-               ============================================= */
-
+               ========================================= */
             else
             {
                 send_response(
