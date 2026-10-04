@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/sysinfo.h>
@@ -15,9 +17,15 @@
 
 #define BUFFER_SIZE 4096
 #define STORAGE_DIR "./agentfiles/IT24102705"
+#define LOG_FILE "remoteops_IT24102705.log"
 #define MAX_FILE_SIZE (10 * 1024 * 1024)
 
 #define MONITOR_INTERVAL 5
+
+/* =================================================
+   GLOBAL LOG MUTEX
+   ================================================= */
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* =================================================
    BUFFERED TCP READER
@@ -32,19 +40,16 @@ typedef struct
 
 /* =================================================
    UDP MONITOR INFORMATION
-   One monitor belongs to one Controller session.
    ================================================= */
 typedef struct
 {
     pthread_t thread_id;
-
     pthread_mutex_t mutex;
 
     int active;
     int thread_running;
 
     struct in_addr controller_ip;
-
     int udp_port;
 } MonitorContext;
 
@@ -54,11 +59,82 @@ typedef struct
 typedef struct
 {
     int client_fd;
-
     struct sockaddr_in client_addr;
 
     MonitorContext monitor;
 } ClientSession;
+
+/* =================================================
+   THREAD-SAFE LOGGING
+   ================================================= */
+void log_event(const char *format, ...)
+{
+    FILE *log_file;
+
+    time_t now;
+    struct tm time_info;
+
+    char timestamp[64];
+
+    time(&now);
+
+    localtime_r(
+        &now,
+        &time_info
+    );
+
+    strftime(
+        timestamp,
+        sizeof(timestamp),
+        "%Y-%m-%d %H:%M:%S",
+        &time_info
+    );
+
+    pthread_mutex_lock(
+        &log_mutex
+    );
+
+    log_file =
+        fopen(
+            LOG_FILE,
+            "a"
+        );
+
+    if (log_file != NULL)
+    {
+        fprintf(
+            log_file,
+            "[%s] ",
+            timestamp
+        );
+
+        va_list args;
+
+        va_start(
+            args,
+            format
+        );
+
+        vfprintf(
+            log_file,
+            format,
+            args
+        );
+
+        va_end(args);
+
+        fprintf(
+            log_file,
+            "\n"
+        );
+
+        fclose(log_file);
+    }
+
+    pthread_mutex_unlock(
+        &log_mutex
+    );
+}
 
 /* =================================================
    SEND ALL TCP BYTES
@@ -87,7 +163,8 @@ int send_all(
             return -1;
         }
 
-        total += (size_t)sent;
+        total +=
+            (size_t)sent;
     }
 
     return 0;
@@ -136,7 +213,8 @@ ssize_t read_line(
 
                 line[line_pos] = '\0';
 
-                return (ssize_t)line_pos;
+                return
+                    (ssize_t)line_pos;
             }
 
             if (line_pos + 1 >= line_size)
@@ -144,7 +222,8 @@ ssize_t read_line(
                 return -2;
             }
 
-            line[line_pos++] = (char)c;
+            line[line_pos++] =
+                (char)c;
         }
 
         ssize_t received =
@@ -161,7 +240,8 @@ ssize_t read_line(
         }
 
         reader->start = 0;
-        reader->end = (size_t)received;
+        reader->end =
+            (size_t)received;
     }
 }
 
@@ -173,14 +253,16 @@ int read_exact(
     FILE *file,
     size_t total_bytes)
 {
-    size_t remaining = total_bytes;
+    size_t remaining =
+        total_bytes;
 
     while (remaining > 0)
     {
         if (reader->start < reader->end)
         {
             size_t available =
-                reader->end - reader->start;
+                reader->end -
+                reader->start;
 
             size_t amount =
                 available < remaining
@@ -203,7 +285,9 @@ int read_exact(
             continue;
         }
 
-        unsigned char temp[BUFFER_SIZE];
+        unsigned char temp[
+            BUFFER_SIZE
+        ];
 
         size_t wanted =
             remaining < sizeof(temp)
@@ -227,12 +311,14 @@ int read_exact(
                 temp,
                 1,
                 (size_t)received,
-                file) != (size_t)received)
+                file) !=
+            (size_t)received)
         {
             return -1;
         }
 
-        remaining -= (size_t)received;
+        remaining -=
+            (size_t)received;
     }
 
     return 0;
@@ -271,9 +357,7 @@ int valid_filename(
 }
 
 /* =================================================
-   GET SYSTEM INFORMATION
-
-   Used by both TCP SYSINFO and UDP monitor.
+   SYSTEM INFORMATION
    ================================================= */
 int get_system_info(
     double *cpu_load,
@@ -288,13 +372,16 @@ int get_system_info(
     }
 
     *cpu_load =
-        (double)info.loads[0] / 65536.0;
+        (double)info.loads[0] /
+        65536.0;
 
     unsigned long total_ram =
-        info.totalram * info.mem_unit;
+        info.totalram *
+        info.mem_unit;
 
     unsigned long free_ram =
-        info.freeram * info.mem_unit;
+        info.freeram *
+        info.mem_unit;
 
     *mem_used_mb =
         (total_ram - free_ram) /
@@ -313,9 +400,7 @@ void handle_sysinfo(
     int client_fd)
 {
     double cpu_load;
-
     unsigned long mem_used_mb;
-
     long uptime_sec;
 
     char response[BUFFER_SIZE];
@@ -390,12 +475,17 @@ void handle_listproc(
                fp) != NULL)
     {
         line[
-            strcspn(line, "\r\n")
+            strcspn(
+                line,
+                "\r\n"
+            )
         ] = '\0';
 
         if (strlen(response)
             + strlen(line)
-            + strlen(" SID:" SID "\n")
+            + strlen(
+                " SID:" SID "\n"
+            )
             + 2
             >= sizeof(response))
         {
@@ -421,7 +511,8 @@ void handle_listproc(
     if (len > 0 &&
         response[len - 1] == ',')
     {
-        response[len - 1] = '\0';
+        response[len - 1] =
+            '\0';
     }
 
     strcat(
@@ -442,7 +533,8 @@ void handle_exec(
     int client_fd,
     const char *exec_command)
 {
-    const char *shell_command = NULL;
+    const char *shell_command =
+        NULL;
 
     FILE *fp;
 
@@ -454,31 +546,36 @@ void handle_exec(
             exec_command,
             "DATE") == 0)
     {
-        shell_command = "date";
+        shell_command =
+            "date";
     }
     else if (strcmp(
                  exec_command,
                  "UPTIME") == 0)
     {
-        shell_command = "uptime";
+        shell_command =
+            "uptime";
     }
     else if (strcmp(
                  exec_command,
                  "DISKFREE") == 0)
     {
-        shell_command = "df -h";
+        shell_command =
+            "df -h";
     }
     else if (strcmp(
                  exec_command,
                  "HOSTNAME") == 0)
     {
-        shell_command = "hostname";
+        shell_command =
+            "hostname";
     }
     else if (strcmp(
                  exec_command,
                  "WHOAMI") == 0)
     {
-        shell_command = "whoami";
+        shell_command =
+            "whoami";
     }
     else
     {
@@ -517,7 +614,10 @@ void handle_exec(
                fp) != NULL)
     {
         line[
-            strcspn(line, "\r\n")
+            strcspn(
+                line,
+                "\r\n"
+            )
         ] = '\0';
 
         if (strlen(output)
@@ -547,7 +647,8 @@ void handle_exec(
     if (len > 0 &&
         output[len - 1] == ' ')
     {
-        output[len - 1] = '\0';
+        output[len - 1] =
+            '\0';
     }
 
     snprintf(
@@ -585,6 +686,12 @@ void handle_put(
             "\n"
         );
 
+        log_event(
+            "PUT rejected: %s is too large (%zu bytes)",
+            filename,
+            filesize
+        );
+
         return;
     }
 
@@ -595,6 +702,10 @@ void handle_put(
             "ERR 009 INVALID_FILENAME SID:"
             SID
             "\n"
+        );
+
+        log_event(
+            "PUT rejected: invalid filename"
         );
 
         return;
@@ -633,6 +744,11 @@ void handle_put(
             "\n"
         );
 
+        log_event(
+            "PUT failed: could not create %s",
+            filename
+        );
+
         return;
     }
 
@@ -650,6 +766,11 @@ void handle_put(
             "ERR 010 FILE_WRITE_FAILED SID:"
             SID
             "\n"
+        );
+
+        log_event(
+            "PUT failed during transfer: %s",
+            filename
         );
 
         return;
@@ -675,6 +796,12 @@ void handle_put(
         filename,
         filesize
     );
+
+    log_event(
+        "PUT completed: %s (%zu bytes)",
+        filename,
+        filesize
+    );
 }
 
 /* =================================================
@@ -687,7 +814,9 @@ void handle_get(
     char filepath[512];
     char response[BUFFER_SIZE];
 
-    unsigned char buffer[BUFFER_SIZE];
+    unsigned char buffer[
+        BUFFER_SIZE
+    ];
 
     struct stat file_info;
 
@@ -698,6 +827,10 @@ void handle_get(
             "ERR 005 FILE_NOT_FOUND SID:"
             SID
             "\n"
+        );
+
+        log_event(
+            "GET rejected: invalid filename"
         );
 
         return;
@@ -722,6 +855,11 @@ void handle_get(
             "\n"
         );
 
+        log_event(
+            "GET failed: file not found %s",
+            filename
+        );
+
         return;
     }
 
@@ -740,6 +878,11 @@ void handle_get(
             "\n"
         );
 
+        log_event(
+            "GET failed: unable to open %s",
+            filename
+        );
+
         return;
     }
 
@@ -748,7 +891,8 @@ void handle_get(
         sizeof(response),
         "OK FILE_SEND %s %lld SID:%s\n",
         filename,
-        (long long)file_info.st_size,
+        (long long)
+            file_info.st_size,
         SID
     );
 
@@ -758,6 +902,12 @@ void handle_get(
             strlen(response)) < 0)
     {
         fclose(file);
+
+        log_event(
+            "GET failed while sending header: %s",
+            filename
+        );
+
         return;
     }
 
@@ -776,6 +926,12 @@ void handle_get(
                 bytes_read) < 0)
         {
             fclose(file);
+
+            log_event(
+                "GET interrupted: %s",
+                filename
+            );
+
             return;
         }
     }
@@ -785,12 +941,20 @@ void handle_get(
     printf(
         "File sent: %s (%lld bytes)\n",
         filename,
-        (long long)file_info.st_size
+        (long long)
+            file_info.st_size
+    );
+
+    log_event(
+        "GET completed: %s (%lld bytes)",
+        filename,
+        (long long)
+            file_info.st_size
     );
 }
 
 /* =================================================
-   CHECK MONITOR ACTIVE STATE
+   CHECK MONITOR STATE
    ================================================= */
 int monitor_is_active(
     MonitorContext *monitor)
@@ -862,13 +1026,9 @@ void *udp_monitor_thread(
     destination.sin_port =
         htons(
             (unsigned short)
-            monitor->udp_port
+                monitor->udp_port
         );
 
-    /*
-       Send first datagram immediately.
-       Then send one every 5 seconds.
-    */
     while (monitor_is_active(
                monitor))
     {
@@ -900,16 +1060,12 @@ void *udp_monitor_thread(
                 message,
                 strlen(message),
                 0,
-                (struct sockaddr *)&destination,
+                (struct sockaddr *)
+                    &destination,
                 sizeof(destination)
             );
         }
 
-        /*
-           Sleep as five 1-second periods.
-           This lets MONITOR STOP respond
-           faster than one full 5-second sleep.
-        */
         for (int i = 0;
              i < MONITOR_INTERVAL;
              i++)
@@ -930,7 +1086,8 @@ void *udp_monitor_thread(
         &monitor->mutex
     );
 
-    monitor->thread_running = 0;
+    monitor->thread_running =
+        0;
 
     pthread_mutex_unlock(
         &monitor->mutex
@@ -947,9 +1104,6 @@ void handle_monitor_start(
     ClientSession *session,
     int udp_port)
 {
-    /*
-       UDP port must be valid.
-    */
     if (udp_port < 1 ||
         udp_port > 65535)
     {
@@ -960,6 +1114,11 @@ void handle_monitor_start(
             "\n"
         );
 
+        log_event(
+            "MONITOR START rejected: invalid UDP port %d",
+            udp_port
+        );
+
         return;
     }
 
@@ -967,10 +1126,6 @@ void handle_monitor_start(
         &session->monitor.mutex
     );
 
-    /*
-       Do not create a second monitor for the
-       same Controller session.
-    */
     if (session->monitor.active ||
         session->monitor.thread_running)
     {
@@ -989,7 +1144,9 @@ void handle_monitor_start(
     }
 
     session->monitor.active = 1;
-    session->monitor.thread_running = 1;
+
+    session->monitor.thread_running =
+        1;
 
     session->monitor.controller_ip =
         session->client_addr.sin_addr;
@@ -1025,6 +1182,11 @@ void handle_monitor_start(
             "\n"
         );
 
+        log_event(
+            "MONITOR START failed on UDP port %d",
+            udp_port
+        );
+
         return;
     }
 
@@ -1039,13 +1201,15 @@ void handle_monitor_start(
         "UDP monitor started for port %d.\n",
         udp_port
     );
+
+    log_event(
+        "UDP monitoring started on port %d",
+        udp_port
+    );
 }
 
 /* =================================================
-   STOP UDP MONITOR
-
-   send_reply = 1 for MONITOR STOP
-   send_reply = 0 for QUIT/disconnect cleanup
+   MONITOR STOP
    ================================================= */
 void stop_monitor(
     int client_fd,
@@ -1085,6 +1249,10 @@ void stop_monitor(
             SID
             "\n"
         );
+
+        log_event(
+            "UDP monitoring stopped"
+        );
     }
 }
 
@@ -1100,7 +1268,9 @@ void *handle_client(
     int client_fd =
         session->client_fd;
 
-    char client_ip[INET_ADDRSTRLEN];
+    char client_ip[
+        INET_ADDRSTRLEN
+    ];
 
     inet_ntop(
         AF_INET,
@@ -1111,6 +1281,11 @@ void *handle_client(
 
     printf(
         "\nController connected from %s\n",
+        client_ip
+    );
+
+    log_event(
+        "Controller connected from %s",
         client_ip
     );
 
@@ -1140,6 +1315,11 @@ void *handle_client(
                 client_ip
             );
 
+            log_event(
+                "Controller %s disconnected",
+                client_ip
+            );
+
             break;
         }
 
@@ -1147,6 +1327,11 @@ void *handle_client(
         {
             printf(
                 "Connection/read error from %s.\n",
+                client_ip
+            );
+
+            log_event(
+                "Connection/read error from %s",
                 client_ip
             );
 
@@ -1158,6 +1343,29 @@ void *handle_client(
             client_ip,
             command
         );
+
+        /*
+           Do not store the authentication token
+           itself in the log file.
+        */
+        if (strncmp(
+                command,
+                "AUTH ",
+                5) == 0)
+        {
+            log_event(
+                "Command from %s: AUTH",
+                client_ip
+            );
+        }
+        else
+        {
+            log_event(
+                "Command from %s: %s",
+                client_ip,
+                command
+            );
+        }
 
         /* =========================================
            AUTH
@@ -1182,6 +1390,11 @@ void *handle_client(
                     "[%s] Authentication successful.\n",
                     client_ip
                 );
+
+                log_event(
+                    "Authentication successful for %s",
+                    client_ip
+                );
             }
             else
             {
@@ -1196,14 +1409,17 @@ void *handle_client(
                     "[%s] Authentication failed.\n",
                     client_ip
                 );
+
+                log_event(
+                    "Authentication failed for %s",
+                    client_ip
+                );
             }
 
             continue;
         }
 
-        /* =========================================
-           SYSINFO
-           ========================================= */
+        /* SYSINFO */
         if (strcmp(
                 command,
                 "SYSINFO"
@@ -1214,9 +1430,7 @@ void *handle_client(
             );
         }
 
-        /* =========================================
-           LISTPROC
-           ========================================= */
+        /* LISTPROC */
         else if (strcmp(
                      command,
                      "LISTPROC"
@@ -1227,9 +1441,7 @@ void *handle_client(
             );
         }
 
-        /* =========================================
-           EXEC
-           ========================================= */
+        /* EXEC */
         else if (strncmp(
                      command,
                      "EXEC ",
@@ -1242,9 +1454,7 @@ void *handle_client(
             );
         }
 
-        /* =========================================
-           PUT
-           ========================================= */
+        /* PUT */
         else if (strncmp(
                      command,
                      "PUT ",
@@ -1279,9 +1489,7 @@ void *handle_client(
             }
         }
 
-        /* =========================================
-           GET
-           ========================================= */
+        /* GET */
         else if (strncmp(
                      command,
                      "GET ",
@@ -1311,9 +1519,7 @@ void *handle_client(
             }
         }
 
-        /* =========================================
-           MONITOR START <udp_port>
-           ========================================= */
+        /* MONITOR START */
         else if (strncmp(
                      command,
                      "MONITOR START ",
@@ -1344,9 +1550,7 @@ void *handle_client(
             }
         }
 
-        /* =========================================
-           MONITOR STOP
-           ========================================= */
+        /* MONITOR STOP */
         else if (strcmp(
                      command,
                      "MONITOR STOP"
@@ -1359,17 +1563,12 @@ void *handle_client(
             );
         }
 
-        /* =========================================
-           QUIT
-           ========================================= */
+        /* QUIT */
         else if (strcmp(
                      command,
                      "QUIT"
                  ) == 0)
         {
-            /*
-               Stop monitoring before closing TCP.
-            */
             stop_monitor(
                 client_fd,
                 session,
@@ -1388,12 +1587,15 @@ void *handle_client(
                 client_ip
             );
 
+            log_event(
+                "Controller %s requested QUIT",
+                client_ip
+            );
+
             break;
         }
 
-        /* =========================================
-           UNKNOWN COMMAND
-           ========================================= */
+        /* UNKNOWN */
         else
         {
             send_response(
@@ -1405,10 +1607,6 @@ void *handle_client(
         }
     }
 
-    /*
-       Also stop UDP monitoring if Controller
-       disconnects without sending QUIT.
-    */
     stop_monitor(
         client_fd,
         session,
@@ -1423,6 +1621,11 @@ void *handle_client(
 
     printf(
         "Controller %s connection closed.\n",
+        client_ip
+    );
+
+    log_event(
+        "Controller %s connection closed",
         client_ip
     );
 
@@ -1441,10 +1644,6 @@ int main(void)
 
     struct sockaddr_in server_addr;
 
-    /*
-       Prevent whole Agent from terminating if
-       a Controller disconnects unexpectedly.
-    */
     signal(
         SIGPIPE,
         SIG_IGN
@@ -1494,7 +1693,8 @@ int main(void)
 
     if (bind(
             server_fd,
-            (struct sockaddr *)&server_addr,
+            (struct sockaddr *)
+                &server_addr,
             sizeof(server_addr)) < 0)
     {
         perror("bind");
@@ -1504,9 +1704,6 @@ int main(void)
         return 1;
     }
 
-    /*
-       Backlog larger than required 5 Controllers.
-    */
     if (listen(
             server_fd,
             10) < 0)
@@ -1536,9 +1733,16 @@ int main(void)
         MONITOR_INTERVAL
     );
 
-    /* =================================================
-       ACCEPT LOOP
-       ================================================= */
+    printf(
+        "Logging to: %s\n",
+        LOG_FILE
+    );
+
+    log_event(
+        "RemoteOps Agent started on TCP port %d",
+        PORT
+    );
+
     while (1)
     {
         ClientSession *session =
@@ -1559,7 +1763,9 @@ int main(void)
         );
 
         socklen_t client_len =
-            sizeof(session->client_addr);
+            sizeof(
+                session->client_addr
+            );
 
         session->client_fd =
             accept(
@@ -1578,17 +1784,16 @@ int main(void)
             continue;
         }
 
-        /*
-           Initialize monitor state for this
-           Controller connection.
-        */
         pthread_mutex_init(
             &session->monitor.mutex,
             NULL
         );
 
-        session->monitor.active = 0;
-        session->monitor.thread_running = 0;
+        session->monitor.active =
+            0;
+
+        session->monitor.thread_running =
+            0;
 
         pthread_t client_thread;
 
@@ -1613,9 +1818,6 @@ int main(void)
             continue;
         }
 
-        /*
-           Client thread cleans itself up.
-        */
         pthread_detach(
             client_thread
         );
