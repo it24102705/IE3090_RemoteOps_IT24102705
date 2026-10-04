@@ -1,0 +1,12 @@
+# Compiled binaries
+agent_705
+controller_705
+
+# Downloaded test files
+downloaded_test.txt
+
+# Runtime uploaded files
+agentfiles/
+
+# Runtime log
+remoteops_IT24102705.log
