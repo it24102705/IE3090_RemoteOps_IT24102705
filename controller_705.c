@@ -7,7 +7,7 @@
 
 #define SERVER_IP "127.0.0.1"
 #define PORT 9410
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4096
 
 /* Send a command and receive one response */
 int send_command(int sock_fd, const char *command)
@@ -59,6 +59,7 @@ int main(void)
         return 1;
     }
 
+    /* Configure Agent address */
     memset(&server_addr, 0, sizeof(server_addr));
 
     server_addr.sin_family = AF_INET;
@@ -76,6 +77,7 @@ int main(void)
     printf("Connecting to Agent %s:%d...\n",
            SERVER_IP, PORT);
 
+    /* Connect to Agent */
     if (connect(sock_fd,
                 (struct sockaddr *)&server_addr,
                 sizeof(server_addr)) < 0)
@@ -85,9 +87,9 @@ int main(void)
         return 1;
     }
 
-    printf("Connected to RemoteOps Agent successfully.\n");
+    printf("Connected to RemoteOps Agent successfully.\n\n");
 
-    /* Step 1: Authenticate */
+    /* 1. Authenticate */
     if (send_command(sock_fd,
                      "AUTH OPS-2705\n") < 0)
     {
@@ -95,7 +97,9 @@ int main(void)
         return 1;
     }
 
-    /* Step 2: Request system information */
+    printf("\n");
+
+    /* 2. Request system information */
     if (send_command(sock_fd,
                      "SYSINFO\n") < 0)
     {
@@ -103,7 +107,19 @@ int main(void)
         return 1;
     }
 
-    /* Step 3: Graceful disconnect */
+    printf("\n");
+
+    /* 3. Request process list */
+    if (send_command(sock_fd,
+                     "LISTPROC\n") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+    /* 4. Graceful disconnect */
     if (send_command(sock_fd,
                      "QUIT\n") < 0)
     {
