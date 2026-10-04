@@ -614,6 +614,19 @@ int main(void)
     }
 
     printf("\n");
+   
+       /* LISTPROC */
+    if (send_command(
+            sock_fd,
+            "LISTPROC\n") < 0)
+    {
+        close(sock_fd);
+        return 1;
+    }
+
+    printf("\n");
+
+
 
     /* EXEC ALLOWED */
     if (send_command(
