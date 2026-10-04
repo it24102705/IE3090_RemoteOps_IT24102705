@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <pthread.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/sysinfo.h>
@@ -25,6 +27,15 @@ typedef struct
     size_t start;
     size_t end;
 } ConnReader;
+
+/* =================================================
+   INFORMATION PASSED TO EACH CLIENT THREAD
+   ================================================= */
+typedef struct
+{
+    int client_fd;
+    struct sockaddr_in client_addr;
+} ClientSession;
 
 /* =================================================
    SEND ALL BYTES
@@ -126,8 +137,7 @@ ssize_t read_line(
 }
 
 /* =================================================
-   READ EXACT RAW BYTES
-   Used by PUT
+   READ EXACT RAW BYTES FOR PUT
    ================================================= */
 int read_exact(
     ConnReader *reader,
@@ -138,10 +148,6 @@ int read_exact(
 
     while (remaining > 0)
     {
-        /*
-           First use any bytes already received
-           after the PUT command line.
-        */
         if (reader->start < reader->end)
         {
             size_t available =
@@ -149,8 +155,8 @@ int read_exact(
 
             size_t amount =
                 available < remaining
-                ? available
-                : remaining;
+                    ? available
+                    : remaining;
 
             if (fwrite(
                     reader->buffer + reader->start,
@@ -213,9 +219,6 @@ int valid_filename(const char *filename)
         return 0;
     }
 
-    /*
-       Prevent directory traversal.
-    */
     if (strstr(filename, "..") != NULL)
     {
         return 0;
@@ -236,13 +239,6 @@ int valid_filename(const char *filename)
 void handle_sysinfo(int client_fd)
 {
     struct sysinfo info;
-
-    double cpu_load;
-
-    unsigned long mem_used_mb;
-    unsigned long total_ram;
-    unsigned long free_ram;
-
     char response[BUFFER_SIZE];
 
     if (sysinfo(&info) != 0)
@@ -255,16 +251,16 @@ void handle_sysinfo(int client_fd)
         return;
     }
 
-    cpu_load =
+    double cpu_load =
         (double)info.loads[0] / 65536.0;
 
-    total_ram =
+    unsigned long total_ram =
         info.totalram * info.mem_unit;
 
-    free_ram =
+    unsigned long free_ram =
         info.freeram * info.mem_unit;
 
-    mem_used_mb =
+    unsigned long mem_used_mb =
         (total_ram - free_ram) /
         (1024 * 1024);
 
@@ -290,7 +286,6 @@ void handle_sysinfo(int client_fd)
 void handle_listproc(int client_fd)
 {
     FILE *fp;
-
     char line[128];
     char response[BUFFER_SIZE];
 
@@ -368,14 +363,10 @@ void handle_exec(
     const char *shell_command = NULL;
 
     FILE *fp;
-
     char line[256];
     char output[BUFFER_SIZE];
     char response[BUFFER_SIZE];
 
-    /*
-       Fixed assignment whitelist.
-    */
     if (strcmp(
             exec_command,
             "DATE") == 0)
@@ -469,10 +460,6 @@ void handle_exec(
         output[len - 1] = '\0';
     }
 
-    /*
-       Exact assignment format:
-       OK EXEC_RESULT <output> SID:<sid>
-    */
     snprintf(
         response,
         sizeof(response),
@@ -489,7 +476,6 @@ void handle_exec(
 
 /* =================================================
    PUT
-   Controller -> Agent
    ================================================= */
 void handle_put(
     int client_fd,
@@ -500,9 +486,6 @@ void handle_put(
     char filepath[512];
     char response[BUFFER_SIZE];
 
-    /*
-       Maximum upload size = 10 MB.
-    */
     if (filesize > MAX_FILE_SIZE)
     {
         send_response(
@@ -527,9 +510,6 @@ void handle_put(
         return;
     }
 
-    /*
-       Create personalised storage directory.
-    */
     mkdir(
         "./agentfiles",
         0755
@@ -566,19 +546,12 @@ void handle_put(
         return;
     }
 
-    /*
-       Receive exactly <filesize> raw bytes.
-    */
     if (read_exact(
             reader,
             file,
             filesize) != 0)
     {
         fclose(file);
-
-        /*
-           Remove incomplete file.
-        */
         remove(filepath);
 
         send_response(
@@ -593,9 +566,6 @@ void handle_put(
 
     fclose(file);
 
-    /*
-       Exact assignment PUT response.
-    */
     snprintf(
         response,
         sizeof(response),
@@ -618,7 +588,6 @@ void handle_put(
 
 /* =================================================
    GET
-   Agent -> Controller
    ================================================= */
 void handle_get(
     int client_fd,
@@ -631,9 +600,6 @@ void handle_get(
 
     struct stat file_info;
 
-    /*
-       Reject unsafe filenames.
-    */
     if (!valid_filename(filename))
     {
         send_response(
@@ -654,9 +620,6 @@ void handle_get(
         filename
     );
 
-    /*
-       Check whether requested file exists.
-    */
     if (stat(
             filepath,
             &file_info) != 0)
@@ -689,11 +652,6 @@ void handle_get(
         return;
     }
 
-    /*
-       Exact assignment GET response header:
-
-       OK FILE_SEND <filename> <filesize> SID:<sid>
-    */
     snprintf(
         response,
         sizeof(response),
@@ -712,10 +670,6 @@ void handle_get(
         return;
     }
 
-    /*
-       Send exactly filesize raw bytes
-       immediately after the header.
-    */
     size_t bytes_read;
 
     while ((bytes_read =
@@ -745,22 +699,312 @@ void handle_get(
 }
 
 /* =================================================
+   CONTROLLER THREAD
+
+   Every connected Controller gets its own thread.
+   Therefore multiple Controllers can operate
+   simultaneously.
+   ================================================= */
+void *handle_client(void *arg)
+{
+    ClientSession *session =
+        (ClientSession *)arg;
+
+    int client_fd =
+        session->client_fd;
+
+    struct sockaddr_in client_addr =
+        session->client_addr;
+
+    /*
+       We no longer need the dynamically allocated
+       ClientSession structure.
+    */
+    free(session);
+
+    char client_ip[INET_ADDRSTRLEN];
+
+    inet_ntop(
+        AF_INET,
+        &client_addr.sin_addr,
+        client_ip,
+        sizeof(client_ip)
+    );
+
+    printf(
+        "\nController connected from %s\n",
+        client_ip
+    );
+
+    /*
+       IMPORTANT:
+       Authentication is local to this thread.
+       Each Controller must authenticate separately.
+    */
+    int authenticated = 0;
+
+    ConnReader reader;
+
+    reader.fd = client_fd;
+    reader.start = 0;
+    reader.end = 0;
+
+    char command[BUFFER_SIZE];
+
+    while (1)
+    {
+        ssize_t result =
+            read_line(
+                &reader,
+                command,
+                sizeof(command)
+            );
+
+        if (result == 0)
+        {
+            printf(
+                "Controller %s disconnected.\n",
+                client_ip
+            );
+
+            break;
+        }
+
+        if (result < 0)
+        {
+            printf(
+                "Connection/read error from %s.\n",
+                client_ip
+            );
+
+            break;
+        }
+
+        printf(
+            "[%s] Received: %s\n",
+            client_ip,
+            command
+        );
+
+        /* =========================================
+           AUTHENTICATION
+           ========================================= */
+        if (!authenticated)
+        {
+            if (strcmp(
+                    command,
+                    "AUTH " AUTH_TOKEN
+                ) == 0)
+            {
+                authenticated = 1;
+
+                send_response(
+                    client_fd,
+                    "OK AUTHENTICATED SID:"
+                    SID
+                    "\n"
+                );
+
+                printf(
+                    "[%s] Authentication successful.\n",
+                    client_ip
+                );
+            }
+            else
+            {
+                send_response(
+                    client_fd,
+                    "ERR 001 AUTH_FAILED SID:"
+                    SID
+                    "\n"
+                );
+
+                printf(
+                    "[%s] Authentication failed.\n",
+                    client_ip
+                );
+            }
+
+            continue;
+        }
+
+        /* =========================================
+           SYSINFO
+           ========================================= */
+        if (strcmp(
+                command,
+                "SYSINFO"
+            ) == 0)
+        {
+            handle_sysinfo(
+                client_fd
+            );
+        }
+
+        /* =========================================
+           LISTPROC
+           ========================================= */
+        else if (strcmp(
+                     command,
+                     "LISTPROC"
+                 ) == 0)
+        {
+            handle_listproc(
+                client_fd
+            );
+        }
+
+        /* =========================================
+           EXEC
+           ========================================= */
+        else if (strncmp(
+                     command,
+                     "EXEC ",
+                     5
+                 ) == 0)
+        {
+            handle_exec(
+                client_fd,
+                command + 5
+            );
+        }
+
+        /* =========================================
+           PUT
+           ========================================= */
+        else if (strncmp(
+                     command,
+                     "PUT ",
+                     4
+                 ) == 0)
+        {
+            char filename[256];
+
+            unsigned long long filesize;
+
+            if (sscanf(
+                    command + 4,
+                    "%255s %llu",
+                    filename,
+                    &filesize) == 2)
+            {
+                handle_put(
+                    client_fd,
+                    &reader,
+                    filename,
+                    (size_t)filesize
+                );
+            }
+            else
+            {
+                send_response(
+                    client_fd,
+                    "ERR 011 INVALID_PUT_FORMAT SID:"
+                    SID
+                    "\n"
+                );
+            }
+        }
+
+        /* =========================================
+           GET
+           ========================================= */
+        else if (strncmp(
+                     command,
+                     "GET ",
+                     4
+                 ) == 0)
+        {
+            char filename[256];
+
+            if (sscanf(
+                    command + 4,
+                    "%255s",
+                    filename) == 1)
+            {
+                handle_get(
+                    client_fd,
+                    filename
+                );
+            }
+            else
+            {
+                send_response(
+                    client_fd,
+                    "ERR 005 FILE_NOT_FOUND SID:"
+                    SID
+                    "\n"
+                );
+            }
+        }
+
+        /* =========================================
+           QUIT
+           ========================================= */
+        else if (strcmp(
+                     command,
+                     "QUIT"
+                 ) == 0)
+        {
+            send_response(
+                client_fd,
+                "OK BYE SID:"
+                SID
+                "\n"
+            );
+
+            printf(
+                "[%s] Controller requested QUIT.\n",
+                client_ip
+            );
+
+            break;
+        }
+
+        /* =========================================
+           UNKNOWN COMMAND
+           ========================================= */
+        else
+        {
+            send_response(
+                client_fd,
+                "ERR 003 UNKNOWN_COMMAND SID:"
+                SID
+                "\n"
+            );
+        }
+    }
+
+    close(client_fd);
+
+    printf(
+        "Controller %s connection closed.\n",
+        client_ip
+    );
+
+    return NULL;
+}
+
+/* =================================================
    MAIN
    ================================================= */
 int main(void)
 {
     int server_fd;
-    int client_fd;
     int opt = 1;
 
     struct sockaddr_in server_addr;
-    struct sockaddr_in client_addr;
 
-    socklen_t client_len;
+    /*
+       Prevent Agent process from terminating if
+       a Controller disconnects unexpectedly while
+       the Agent is sending data.
+    */
+    signal(
+        SIGPIPE,
+        SIG_IGN
+    );
 
-    char command[BUFFER_SIZE];
-
-    /* Create TCP socket */
     server_fd =
         socket(
             AF_INET,
@@ -774,9 +1018,6 @@ int main(void)
         return 1;
     }
 
-    /*
-       Allow quick restart of Agent.
-    */
     if (setsockopt(
             server_fd,
             SOL_SOCKET,
@@ -806,7 +1047,6 @@ int main(void)
     server_addr.sin_port =
         htons(PORT);
 
-    /* Bind to personalised port 9410 */
     if (bind(
             server_fd,
             (struct sockaddr *)&server_addr,
@@ -819,9 +1059,13 @@ int main(void)
         return 1;
     }
 
+    /*
+       Backlog of 10 allows pending connections
+       while worker threads handle active clients.
+    */
     if (listen(
             server_fd,
-            5) < 0)
+            10) < 0)
     {
         perror("listen");
 
@@ -839,270 +1083,69 @@ int main(void)
         PORT
     );
 
+    printf(
+        "Concurrent Controller support enabled.\n"
+    );
+
     /* =================================================
-       ACCEPT CONTROLLER CONNECTIONS
+       ACCEPT LOOP
        ================================================= */
     while (1)
     {
-        client_len =
-            sizeof(client_addr);
+        ClientSession *session =
+            malloc(sizeof(ClientSession));
 
-        client_fd =
-            accept(
-                server_fd,
-                (struct sockaddr *)&client_addr,
-                &client_len
-            );
-
-        if (client_fd < 0)
+        if (session == NULL)
         {
-            perror("accept");
+            perror("malloc");
             continue;
         }
 
-        printf(
-            "\nController connected from %s\n",
-            inet_ntoa(client_addr.sin_addr)
-        );
+        socklen_t client_len =
+            sizeof(session->client_addr);
 
-        /*
-           Buffered TCP reader for this connection.
-        */
-        ConnReader reader;
-
-        reader.fd = client_fd;
-        reader.start = 0;
-        reader.end = 0;
-
-        int authenticated = 0;
-
-        /* =============================================
-           COMMAND LOOP
-           ============================================= */
-        while (1)
-        {
-            ssize_t result =
-                read_line(
-                    &reader,
-                    command,
-                    sizeof(command)
-                );
-
-            if (result == 0)
-            {
-                printf(
-                    "Controller disconnected.\n"
-                );
-
-                break;
-            }
-
-            if (result < 0)
-            {
-                printf(
-                    "Connection/read error.\n"
-                );
-
-                break;
-            }
-
-            printf(
-                "Received: %s\n",
-                command
+        session->client_fd =
+            accept(
+                server_fd,
+                (struct sockaddr *)&session->client_addr,
+                &client_len
             );
 
-            /* =========================================
-               AUTHENTICATION
-               ========================================= */
-            if (!authenticated)
-            {
-                if (strcmp(
-                        command,
-                        "AUTH " AUTH_TOKEN
-                    ) == 0)
-                {
-                    authenticated = 1;
+        if (session->client_fd < 0)
+        {
+            perror("accept");
 
-                    send_response(
-                        client_fd,
-                        "OK AUTHENTICATED SID:"
-                        SID
-                        "\n"
-                    );
+            free(session);
 
-                    printf(
-                        "Authentication successful.\n"
-                    );
-                }
-                else
-                {
-                    send_response(
-                        client_fd,
-                        "ERR 001 AUTH_FAILED SID:"
-                        SID
-                        "\n"
-                    );
-
-                    printf(
-                        "Authentication failed.\n"
-                    );
-                }
-
-                continue;
-            }
-
-            /* =========================================
-               SYSINFO
-               ========================================= */
-            if (strcmp(
-                    command,
-                    "SYSINFO"
-                ) == 0)
-            {
-                handle_sysinfo(
-                    client_fd
-                );
-            }
-
-            /* =========================================
-               LISTPROC
-               ========================================= */
-            else if (strcmp(
-                         command,
-                         "LISTPROC"
-                     ) == 0)
-            {
-                handle_listproc(
-                    client_fd
-                );
-            }
-
-            /* =========================================
-               EXEC
-               ========================================= */
-            else if (strncmp(
-                         command,
-                         "EXEC ",
-                         5
-                     ) == 0)
-            {
-                handle_exec(
-                    client_fd,
-                    command + 5
-                );
-            }
-
-            /* =========================================
-               PUT
-               PUT <filename> <filesize>
-               ========================================= */
-            else if (strncmp(
-                         command,
-                         "PUT ",
-                         4
-                     ) == 0)
-            {
-                char filename[256];
-
-                unsigned long long filesize;
-
-                if (sscanf(
-                        command + 4,
-                        "%255s %llu",
-                        filename,
-                        &filesize) == 2)
-                {
-                    handle_put(
-                        client_fd,
-                        &reader,
-                        filename,
-                        (size_t)filesize
-                    );
-                }
-                else
-                {
-                    send_response(
-                        client_fd,
-                        "ERR 011 INVALID_PUT_FORMAT SID:"
-                        SID
-                        "\n"
-                    );
-                }
-            }
-
-            /* =========================================
-               GET
-               GET <filename>
-               ========================================= */
-            else if (strncmp(
-                         command,
-                         "GET ",
-                         4
-                     ) == 0)
-            {
-                char filename[256];
-
-                if (sscanf(
-                        command + 4,
-                        "%255s",
-                        filename) == 1)
-                {
-                    handle_get(
-                        client_fd,
-                        filename
-                    );
-                }
-                else
-                {
-                    send_response(
-                        client_fd,
-                        "ERR 005 FILE_NOT_FOUND SID:"
-                        SID
-                        "\n"
-                    );
-                }
-            }
-
-            /* =========================================
-               QUIT
-               ========================================= */
-            else if (strcmp(
-                         command,
-                         "QUIT"
-                     ) == 0)
-            {
-                send_response(
-                    client_fd,
-                    "OK BYE SID:"
-                    SID
-                    "\n"
-                );
-
-                printf(
-                    "Controller requested QUIT.\n"
-                );
-
-                break;
-            }
-
-            /* =========================================
-               UNKNOWN COMMAND
-               ========================================= */
-            else
-            {
-                send_response(
-                    client_fd,
-                    "ERR 003 UNKNOWN_COMMAND SID:"
-                    SID
-                    "\n"
-                );
-            }
+            continue;
         }
 
-        close(client_fd);
+        pthread_t thread_id;
 
-        printf(
-            "Controller connection closed.\n"
+        /*
+           Create one worker thread for this
+           Controller connection.
+        */
+        if (pthread_create(
+                &thread_id,
+                NULL,
+                handle_client,
+                session) != 0)
+        {
+            perror("pthread_create");
+
+            close(session->client_fd);
+            free(session);
+
+            continue;
+        }
+
+        /*
+           Detached thread cleans up automatically
+           when Controller session finishes.
+        */
+        pthread_detach(
+            thread_id
         );
     }
 
