@@ -77,3 +77,9 @@ Example:
 ```text
 EXEC LS
 ERR 002 COMMAND_NOT_ALLOWED SID:5072
+## Final Testing
+
+Final testing was performed on the RemoteOps implementation.
+The Agent and Controller were tested for authentication, SYSINFO,
+LISTPROC, EXEC, PUT, GET, concurrent client connections, UDP monitoring,
+logging, and graceful disconnection.
