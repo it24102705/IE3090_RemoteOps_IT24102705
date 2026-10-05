@@ -1,3 +1,4 @@
+
 # RemoteOps: Remote System Monitoring and Management Tool
 
 ## IE3090 - Network Programming
@@ -83,3 +84,16 @@ Final testing was performed on the RemoteOps implementation.
 The Agent and Controller were tested for authentication, SYSINFO,
 LISTPROC, EXEC, PUT, GET, concurrent client connections, UDP monitoring,
 logging, and graceful disconnection.
+
+## Functional Test Checklist
+
+- AUTH: Valid authentication token accepted successfully.
+- SYSINFO: CPU load, memory usage and uptime returned correctly.
+- LISTPROC: Running process information returned successfully.
+- EXEC: Whitelisted commands execute and invalid commands are rejected.
+- PUT: Test file uploaded successfully to the personalised storage directory.
+- GET: Uploaded test file downloaded successfully.
+- Concurrency: Multiple Controller connections handled simultaneously.
+- UDP Monitoring: MONITOR START receives periodic system information and MONITOR STOP stops the stream.
+- Logging: Connections, commands and file transfers are recorded in the personalised log file.
+- QUIT: Controller disconnects cleanly without crashing the Agent.
